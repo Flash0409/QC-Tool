@@ -14,9 +14,12 @@ import numpy as np
 import getpass
 import sys
 import subprocess
+import sqlite3
 import shlex
 from difflib import SequenceMatcher
 from handover_database import HandoverDB
+from database_manager import DatabaseManager
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 
 def get_app_base_dir():
     """
@@ -26,6 +29,112 @@ def get_app_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+class ManagerDB:
+    """Simple manager database integration"""
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        """Initialize tables if they don't exist"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS cabinets (
+            cabinet_id TEXT PRIMARY KEY,
+            project_name TEXT,
+            sales_order_no TEXT,
+            total_pages INTEGER DEFAULT 0,
+            annotated_pages INTEGER DEFAULT 0,
+            total_punches INTEGER DEFAULT 0,
+            open_punches INTEGER DEFAULT 0,
+            implemented_punches INTEGER DEFAULT 0,
+            closed_punches INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'quality_inspection',
+            created_date TEXT,
+            last_updated TEXT
+        )''')
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS category_occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cabinet_id TEXT,
+            project_name TEXT,
+            category TEXT,
+            subcategory TEXT,
+            occurrence_date TEXT
+        )''')
+        
+        conn.commit()
+        conn.close()
+    
+    def update_cabinet(self, cabinet_id, project_name, sales_order_no, 
+                      total_pages, annotated_pages, total_punches, 
+                      open_punches, implemented_punches, closed_punches, status):
+        """Update cabinet statistics"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            from datetime import datetime
+            cursor.execute('''
+                INSERT OR REPLACE INTO cabinets 
+                (cabinet_id, project_name, sales_order_no, total_pages, annotated_pages,
+                 total_punches, open_punches, implemented_punches, closed_punches, status,
+                 created_date, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                        COALESCE((SELECT created_date FROM cabinets WHERE cabinet_id = ?), ?),
+                        ?)
+            ''', (cabinet_id, project_name, sales_order_no, total_pages, annotated_pages,
+                  total_punches, open_punches, implemented_punches, closed_punches, status,
+                  cabinet_id, datetime.now().isoformat(), datetime.now().isoformat()))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Manager DB update error: {e}")
+            return False
+    
+    def log_category_occurrence(self, cabinet_id, project_name, category, subcategory):
+        """Log a category occurrence"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            from datetime import datetime
+            cursor.execute('''
+                INSERT INTO category_occurrences 
+                (cabinet_id, project_name, category, subcategory, occurrence_date)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (cabinet_id, project_name, category, subcategory, datetime.now().isoformat()))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Category logging error: {e}")
+            return False
+    
+    def update_status(self, cabinet_id, status):
+        """Update cabinet status"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            from datetime import datetime
+            cursor.execute('''
+                UPDATE cabinets 
+                SET status = ?, last_updated = ?
+                WHERE cabinet_id = ?
+            ''', (status, datetime.now().isoformat(), cabinet_id))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Status update error: {e}")
+            return False
 
 
 class CircuitInspector:
@@ -77,7 +186,8 @@ class CircuitInspector:
             'description': 'C',
             'status': 'D',
             'name':'E',
-            'date':'F'
+            'date':'F',
+            'remark':'G'
         }
 
         self.header_cells = {
@@ -109,12 +219,13 @@ class CircuitInspector:
         self.setup_ui()
         self.current_sr_no = self.get_next_sr_no()
         
-        # Load recent projects on startup
-        self.load_recent_projects_ui()
-
         base = get_app_base_dir()
         db_path = os.path.join(base, "inspection_tool.db")
         self.db = DatabaseManager(db_path)
+        manager_db_path = os.path.join(base, "manager.db")
+        self.manager_db = ManagerDB(manager_db_path)
+        self.handover_db = HandoverDB(os.path.join(base, "handover_db.json"))
+        self.load_recent_projects_ui()
 
     # ================================================================
     # COORDINATE CONVERSION HELPERS
@@ -573,6 +684,7 @@ class CircuitInspector:
             self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
             self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
             self.page_label.config(text=f"Page: {self.current_page + 1}/{len(self.pdf_document)}")
+            self.sync_manager_stats()
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to display page: {e}")
@@ -625,11 +737,13 @@ class CircuitInspector:
                 entry['pos_page'] = [float(pos[0]), float(pos[1])]
 
             data['annotations'].append(entry)
+        self.sync_manager_stats()
 
         try:
             with open(save_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
             messagebox.showinfo("Saved", f"Session saved to:\n{save_path}")
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save session: {e}")
 
@@ -647,6 +761,7 @@ class CircuitInspector:
             return
 
         self.load_session_from_path(path)
+        self.sync_manager_stats()
 
     def load_session_from_path(self, path):
         """Load session from a specific JSON file path"""
@@ -805,6 +920,7 @@ class CircuitInspector:
             out_doc.close()
 
             messagebox.showinfo("Success", f"Annotated PDF saved to:\n{save_path}")
+            self.sync_manager_stats()
 
         except PermissionError:
             messagebox.showerror("Error", "Close the target file (if open) and try again.")
@@ -896,6 +1012,10 @@ class CircuitInspector:
     Find your existing right_frame section and add the button there
     """
 
+    # ============================================================================
+    # UPDATED FUNCTIONS FOR SETUP_UI AND HANDOVER VERIFICATION
+    # ============================================================================
+
     def setup_ui(self):
         """Setup modern professional UI with grouped menu items"""
         
@@ -927,7 +1047,6 @@ class CircuitInspector:
         tools_menu.add_command(label="Review Checklist", command=self.review_checklist_now, accelerator="Ctrl+R")
         tools_menu.add_command(label="Punch Closing Mode", command=self.punch_closing_mode, accelerator="Ctrl+Shift+P")
         tools_menu.add_separator()
-        # ADD THIS LINE:
         tools_menu.add_command(label="🔍 View Production Handbacks", command=self.view_production_handbacks, accelerator="Ctrl+Shift+V")
         
         # View Menu
@@ -945,7 +1064,7 @@ class CircuitInspector:
         self.root.bind_all("<Control-r>", lambda e: self.review_checklist_now())
         self.root.bind_all("<Control-Shift-p>", lambda e: self.punch_closing_mode())
         self.root.bind_all("<Control-Shift-e>", lambda e: self.open_excel())
-        self.root.bind_all("<Control-Shift-v>", lambda e: self.view_production_handbacks())  # ADD THIS
+        self.root.bind_all("<Control-Shift-v>", lambda e: self.view_production_handbacks())
         self.root.bind_all("<Control-plus>", lambda e: self.zoom_in())
         self.root.bind_all("<Control-minus>", lambda e: self.zoom_out())
         
@@ -976,7 +1095,7 @@ class CircuitInspector:
         
         self.recent_var = tk.StringVar(value="Select Project...")
         self.recent_dropdown = tk.OptionMenu(recent_frame, self.recent_var, "Select Project...", 
-                                            command=self.load_recent_project)
+                                            command=self.load_recent_projects_ui)
         self.recent_dropdown.config(bg='#334155', fg='white', font=('Segoe UI', 9), 
                                    width=22, relief=tk.FLAT, borderwidth=0)
         self.recent_dropdown.pack(side=tk.LEFT)
@@ -1008,47 +1127,79 @@ class CircuitInspector:
         # Tool section - Annotation tools
         tool_frame = tk.Frame(toolbar, bg='#1e293b')
         tool_frame.pack(side=tk.LEFT, padx=10)
-        
+
         tk.Label(tool_frame, text="Tools:", bg='#1e293b', fg='#94a3b8', 
                  font=('Segoe UI', 9)).pack(side=tk.LEFT, padx=(0, 8))
-        
-        # Pen Tool Button (icon only)
-        self.pen_btn = tk.Button(tool_frame, text="  ✏️", command=lambda: self.set_tool_mode("pen"),
-                                bg='#334155', fg='white', width=3, height=1,
-                                font=('Segoe UI', 14), relief=tk.FLAT, cursor='hand2',
-                                borderwidth=2)
-        self.pen_btn.pack(side=tk.LEFT, padx=2)
-        
-        # Text Tool Button (icon only)
-        self.text_btn = tk.Button(tool_frame, text="  🅰️", command=lambda: self.set_tool_mode("text"),
-                                 bg='#334155', fg='white', width=3, height=1,
-                                 font=('Segoe UI', 14), relief=tk.FLAT, cursor='hand2',
-                                 borderwidth=2)
-        self.text_btn.pack(side=tk.LEFT, padx=2)
-        
-        # Add tooltips effect
+
+        # UPDATED: Load icons with proper sizing to fill button
+        try:
+            assets_dir = os.path.join(os.path.dirname(get_app_base_dir()), "assets")
+            
+            # FIXED: Larger icon size to fill button (44x44 for 40x40 button with padding)
+            icon_size = (44, 44)
+            
+            # Pen icon
+            pen_icon_path = os.path.join(assets_dir, "pen_icon.png")
+            pen_img = Image.open(pen_icon_path).resize(icon_size, Image.Resampling.LANCZOS)
+            self.pen_icon = ImageTk.PhotoImage(pen_img)
+            
+            # Text icon
+            text_icon_path = os.path.join(assets_dir, "text_icon.png")
+            text_img = Image.open(text_icon_path).resize(icon_size, Image.Resampling.LANCZOS)
+            self.text_icon = ImageTk.PhotoImage(text_img)
+            
+            # FIXED: Buttons with compound='center' and no padding to fill completely
+            self.pen_btn = tk.Button(tool_frame, image=self.pen_icon, 
+                                     command=lambda: self.set_tool_mode("pen"),
+                                     bg='#334155', width=48, height=48,
+                                     relief=tk.FLAT, cursor='hand2',
+                                     borderwidth=0, compound='center',
+                                     padx=0, pady=0)  # No padding
+            self.pen_btn.pack(side=tk.LEFT, padx=2)
+            
+            self.text_btn = tk.Button(tool_frame, image=self.text_icon,
+                                      command=lambda: self.set_tool_mode("text"),
+                                      bg='#334155', width=48, height=48,
+                                      relief=tk.FLAT, cursor='hand2',
+                                      borderwidth=0, compound='center',
+                                      padx=0, pady=0)  # No padding
+            self.text_btn.pack(side=tk.LEFT, padx=2)
+            
+        except Exception as e:
+            print(f"Could not load tool icons: {e}")
+            # Fallback to text-based buttons
+            self.pen_btn = tk.Button(tool_frame, text="✏️ Pen", 
+                                     command=lambda: self.set_tool_mode("pen"),
+                                     bg='#334155', fg='white', width=8, height=1,
+                                     font=('Segoe UI', 9, 'bold'), relief=tk.FLAT, 
+                                     cursor='hand2', borderwidth=2)
+            self.pen_btn.pack(side=tk.LEFT, padx=2)
+            
+            self.text_btn = tk.Button(tool_frame, text="🅰️ Text", 
+                                      command=lambda: self.set_tool_mode("text"),
+                                      bg='#334155', fg='white', width=8, height=1,
+                                      font=('Segoe UI', 9, 'bold'), relief=tk.FLAT, 
+                                      cursor='hand2', borderwidth=2)
+            self.text_btn.pack(side=tk.LEFT, padx=2)
+
+        # Add tooltips
         self.create_tooltip(self.pen_btn, "Pen Tool - Draw freehand annotations")
         self.create_tooltip(self.text_btn, "Text Tool - Add text annotations")
         
         # Right section - Action buttons
-        # THIS IS WHERE YOU SHOULD ADD THE HANDOVER BUTTON
         right_frame = tk.Frame(toolbar, bg='#1e293b')
         right_frame.pack(side=tk.RIGHT, padx=10, pady=10)
         
-        # Define export button style
         export_btn_style = btn_style.copy()
         export_btn_style['bg'] = '#f59e0b'
         
-        # Define handover button style
         handover_btn_style = btn_style.copy()
-        handover_btn_style['bg'] = '#8b5cf6'  # Purple color
+        handover_btn_style['bg'] = '#8b5cf6'
         
-        # ADD HANDOVER BUTTON FIRST (rightmost)
         tk.Button(right_frame, text="🚀 Handover to Production", 
                  command=self.handover_to_production, 
                  **handover_btn_style).pack(side=tk.RIGHT, padx=3)
         
-        # Then export button (second from right)
         tk.Button(right_frame, text="📥 Export", 
                  command=self.export_annotated_pdf, 
                  **export_btn_style).pack(side=tk.RIGHT, padx=3)
@@ -1121,54 +1272,41 @@ class CircuitInspector:
     # ================================================================
     # RECENT PROJECTS MANAGEMENT
     # ================================================================
-    
     def save_recent_project(self):
-        """Save current project to recent projects list"""
+        """Save current project to database with storage location"""
         if not self.current_pdf_path or not self.excel_file:
             return
         
         try:
-            # Load existing recent projects
-            recent_projects = []
-            if os.path.exists(self.recent_projects_file):
-                with open(self.recent_projects_file, 'r', encoding='utf-8') as f:
-                    recent_projects = json.load(f)
-            
-            # Create new entry
+            # Create session path
             session_path = os.path.join(
                 self.project_dirs.get("sessions", ""),
                 f"{self.cabinet_id}_annotations.json"
             ) if hasattr(self, 'project_dirs') else None
             
-            new_entry = {
+            # Update or add project in database
+            project_data = {
                 'cabinet_id': self.cabinet_id,
                 'project_name': self.project_name,
                 'sales_order_no': self.sales_order_no,
+                'storage_location': self.storage_location,  # IMPORTANT: Store location
                 'pdf_path': self.current_pdf_path,
                 'excel_path': self.excel_file,
                 'session_path': session_path if session_path and os.path.exists(session_path) else None,
                 'last_accessed': datetime.now().isoformat()
             }
             
-            # Remove old entry with same cabinet_id if exists
-            recent_projects = [p for p in recent_projects if p.get('cabinet_id') != self.cabinet_id]
-            
-            # Add new entry at the beginning
-            recent_projects.insert(0, new_entry)
-            
-            # Keep only projects from last 7 days and max 20 entries
-            week_ago = datetime.now().timestamp() - (7 * 24 * 60 * 60)
-            recent_projects = [
-                p for p in recent_projects 
-                if datetime.fromisoformat(p['last_accessed']).timestamp() > week_ago
-            ][:20]
-            
-            # Save updated list
-            with open(self.recent_projects_file, 'w', encoding='utf-8') as f:
-                json.dump(recent_projects, f, indent=2)
+            if self.db.project_exists(self.cabinet_id):
+                # Update existing
+                self.db.update_project(self.cabinet_id, project_data)
+            else:
+                # Add new
+                project_data['created_date'] = datetime.now().isoformat()
+                self.db.add_project(project_data)
             
             # Update dropdown
             self.update_recent_dropdown()
+            self.sync_manager_stats()
             
         except Exception as e:
             print(f"Error saving recent project: {e}")
@@ -1202,18 +1340,54 @@ class CircuitInspector:
     def load_recent_project_from_db(self, project_data):
         """Load a recent project from database"""
         try:
-            # Verify files exist
+            # Set project details FIRST
+            self.cabinet_id = project_data['cabinet_id']
+            self.project_name = project_data['project_name']
+            self.sales_order_no = project_data.get('sales_order_no', '')
+            self.storage_location = project_data['storage_location']
+            
+            # Prepare folders (this creates the proper folder structure)
+            self.prepare_project_folders()
+            
+            # Now construct the CORRECT paths based on folder structure
+            expected_excel_path = os.path.join(
+                self.project_dirs["working_excel"],
+                f"{self.cabinet_id.replace(' ', '_')}_Working.xlsx"
+            )
+            
+            expected_session_path = os.path.join(
+                self.project_dirs["sessions"],
+                f"{self.cabinet_id}_annotations.json"
+            )
+            
+            # Check PDF path from database
             pdf_path = project_data.get('pdf_path')
-            excel_path = project_data.get('excel_path')
-            session_path = project_data.get('session_path')
-            
             if not pdf_path or not os.path.exists(pdf_path):
-                messagebox.showerror("Error", "PDF file not found.")
+                messagebox.showerror("Error", 
+                                   f"PDF file not found:\n{pdf_path}\n\n"
+                                   "The file may have been moved or deleted.")
                 return
             
-            if not excel_path or not os.path.exists(excel_path):
-                messagebox.showerror("Error", "Excel file not found.")
-                return
+            # Use expected Excel path, not database path
+            if not os.path.exists(expected_excel_path):
+                # Try to find it in the old database path first
+                old_excel_path = project_data.get('excel_path')
+                if old_excel_path and os.path.exists(old_excel_path):
+                    # Copy from old location to new location
+                    try:
+                        import shutil
+                        shutil.copy2(old_excel_path, expected_excel_path)
+                        messagebox.showinfo("Excel Migrated", 
+                                          f"Excel file migrated to new location:\n{expected_excel_path}")
+                    except Exception as e:
+                        messagebox.showerror("Error", 
+                                           f"Excel file not found and couldn't migrate:\n{e}")
+                        return
+                else:
+                    messagebox.showerror("Error", 
+                                       f"Excel file not found at:\n{expected_excel_path}\n\n"
+                                       "The file may have been moved or deleted.")
+                    return
             
             # Load PDF
             self.pdf_document = fitz.open(pdf_path)
@@ -1221,43 +1395,53 @@ class CircuitInspector:
             self.current_page = 0
             self.annotations = []
             self.zoom_level = 1.0
+            self.tool_mode = None
+            self.root.config(cursor="")
             
-            # Set project details
-            self.cabinet_id = project_data['cabinet_id']
-            self.project_name = project_data['project_name']
-            self.sales_order_no = project_data.get('sales_order_no', '')
-            self.storage_location = project_data['storage_location']
-            
-            # Prepare folders
-            self.prepare_project_folders()
-            
-            # Set Excel file
-            self.excel_file = excel_path
-            self.working_excel_path = excel_path
+            # Set Excel file to expected path
+            self.excel_file = expected_excel_path
+            self.working_excel_path = expected_excel_path
             
             # Get next SR number
             self.current_sr_no = self.get_next_sr_no()
             
-            # Load session if available
-            if session_path and os.path.exists(session_path):
-                self.load_session_from_path(session_path)
+            # Load session if available at expected location
+            if os.path.exists(expected_session_path):
+                self.load_session_from_path(expected_session_path)
             else:
-                self.display_page()
+                # Try old session path from database
+                old_session_path = project_data.get('session_path')
+                if old_session_path and os.path.exists(old_session_path):
+                    # Copy to new location
+                    try:
+                        import shutil
+                        shutil.copy2(old_session_path, expected_session_path)
+                        self.load_session_from_path(expected_session_path)
+                    except:
+                        self.display_page()
+                else:
+                    self.display_page()
             
-            # Update database
+            # Update database with correct paths
             self.db.update_project(self.cabinet_id, {
+                'pdf_path': self.current_pdf_path,
+                'excel_path': expected_excel_path,
+                'session_path': expected_session_path if os.path.exists(expected_session_path) else None,
                 'last_accessed': datetime.now().isoformat()
             })
             
             messagebox.showinfo(
                 "Project Loaded",
-                f"Loaded: {self.cabinet_id}\n"
+                f"✓ Loaded: {self.cabinet_id}\n"
                 f"Project: {self.project_name}\n"
-                f"Location: {self.storage_location}"
+                f"Location: {self.storage_location}\n"
+                f"Pages: {len(self.pdf_document)}"
             )
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load project:\n{e}")
+            import traceback
+            traceback.print_exc()
 
     # ================================================================
     # CELL HELPERS
@@ -1309,7 +1493,6 @@ class CircuitInspector:
             self.drawing = False
             self.drawing_type = None
             self._flash_status("Normal mode", bg='#64748b')
-            wb.close()
 
     # ================================================================
     # PDF LOADING
@@ -1332,6 +1515,8 @@ class CircuitInspector:
                 self.current_sr_no = self.get_next_sr_no()
                 self.display_page()
                 messagebox.showinfo("Success", f"Loaded PDF with {len(self.pdf_document)} pages")
+                
+                # Ask project details (will auto-fill if project exists)
                 self.ask_project_details()
                 self.prepare_project_folders()
 
@@ -1360,17 +1545,31 @@ class CircuitInspector:
 
                 self.write_project_details_to_excel()
 
+                # Get expected session path
+                expected_session_path = os.path.join(
+                    self.project_dirs["sessions"],
+                    f"{self.cabinet_id}_annotations.json"
+                )
+
+                # Update database with CORRECT paths immediately
+                self.db.update_project(self.cabinet_id, {
+                    'pdf_path': self.current_pdf_path,
+                    'excel_path': self.excel_file,
+                    'session_path': expected_session_path if os.path.exists(expected_session_path) else None,
+                    'storage_location': self.storage_location,
+                    'last_accessed': datetime.now().isoformat()
+                })
+
                 # Auto load session if exists
-                session_path = self.get_session_path_for_pdf()
-                if session_path:
+                if os.path.exists(expected_session_path):
                     resume = messagebox.askyesno(
                         "Resume Session",
                         f"Existing session found for this drawing:\n\n"
-                        f"{os.path.basename(session_path)}\n\n"
+                        f"{os.path.basename(expected_session_path)}\n\n"
                         "Do you want to resume it?"
                     )
                     if resume:
-                        self.load_session_from_path(session_path)
+                        self.load_session_from_path(expected_session_path)
                 
                 # Save to recent projects
                 self.save_recent_project()
@@ -1660,6 +1859,16 @@ class CircuitInspector:
             self.display_page()
 
             self.root.after(100, lambda: messagebox.showinfo("Logged", f"Punch logged:\n{punch_text}"))
+            try:
+                self.manager_db.log_category_occurrence(
+                    self.cabinet_id,
+                    self.project_name,
+                    component_type,
+                    error_name
+                )
+                self.sync_manager_stats()
+            except Exception as e:
+                print(f"Manager category logging failed: {e}")
 
         except PermissionError:
             messagebox.showerror("Error", "Close the Excel file before writing to it.")
@@ -1746,6 +1955,17 @@ class CircuitInspector:
             self.display_page()
 
             self.root.after(100, lambda: messagebox.showinfo("Logged", f"Custom punch logged:\n{custom_action}"))
+
+            try:
+                self.manager_db.log_category_occurrence(
+                    self.cabinet_id,
+                    self.project_name,
+                    custom_category,
+                    None
+                )
+                self.sync_manager_stats()
+            except Exception as e:
+                print(f"Manager category logging failed: {e}")
 
             updated = self.update_interphase_status_for_ref(ref_no, status='NOK')
             if updated:
@@ -1838,73 +2058,74 @@ class CircuitInspector:
         # Modern dialog window
         dlg = tk.Toplevel(self.root)
         dlg.title("Punch Closing Mode")
-        dlg.geometry("950x550")
+        dlg.geometry("950x600")  # Slightly taller
         dlg.configure(bg='#f8fafc')
         dlg.transient(self.root)
         dlg.grab_set()
         
-        # Header
-        header_frame = tk.Frame(dlg, bg='#1e293b', height=60)
+        # Header - REDUCED HEIGHT
+        header_frame = tk.Frame(dlg, bg='#1e293b', height=50)  # Reduced from 60
         header_frame.pack(fill=tk.X)
         header_frame.pack_propagate(False)
         
         tk.Label(header_frame, text="✓ Punch Closing Mode", 
                 bg='#1e293b', fg='white', 
-                font=('Segoe UI', 14, 'bold')).pack(pady=15)
+                font=('Segoe UI', 13, 'bold')).pack(pady=12)  # Reduced padding
         
-        # Progress
+        # Progress - REDUCED PADDING
         progress_frame = tk.Frame(dlg, bg='#f8fafc')
-        progress_frame.pack(fill=tk.X, padx=20, pady=(15, 5))
+        progress_frame.pack(fill=tk.X, padx=20, pady=(10, 5))  # Reduced top padding
         
-        idx_label = tk.Label(progress_frame, text="", font=('Segoe UI', 11, 'bold'),
+        idx_label = tk.Label(progress_frame, text="", font=('Segoe UI', 10, 'bold'),
                             bg='#f8fafc', fg='#1e293b')
         idx_label.pack()
         
-        # Info cards
+        # ORIGINAL Info cards - KEPT AS BEFORE
         info_frame = tk.Frame(dlg, bg='#f8fafc')
-        info_frame.pack(fill=tk.X, padx=20, pady=10)
+        info_frame.pack(fill=tk.X, padx=20, pady=8)  # Slightly reduced padding
         
         # SR Number card
         sr_card = tk.Frame(info_frame, bg='#dbeafe', relief=tk.FLAT)
         sr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
         tk.Label(sr_card, text="SR No.", font=('Segoe UI', 8), 
-                bg='#dbeafe', fg='#1e40af').pack(anchor='w', padx=10, pady=(8, 2))
+                bg='#dbeafe', fg='#1e40af').pack(anchor='w', padx=10, pady=(6, 2))  # Reduced padding
         sr_label = tk.Label(sr_card, text="", font=('Segoe UI', 12, 'bold'),
                            bg='#dbeafe', fg='#1e293b')
-        sr_label.pack(anchor='w', padx=10, pady=(0, 8))
+        sr_label.pack(anchor='w', padx=10, pady=(0, 6))  # Reduced padding
         
         # Reference card
         ref_card = tk.Frame(info_frame, bg='#e0e7ff', relief=tk.FLAT)
         ref_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
         tk.Label(ref_card, text="Reference", font=('Segoe UI', 8), 
-                bg='#e0e7ff', fg='#4338ca').pack(anchor='w', padx=10, pady=(8, 2))
+                bg='#e0e7ff', fg='#4338ca').pack(anchor='w', padx=10, pady=(6, 2))
         ref_label = tk.Label(ref_card, text="", font=('Segoe UI', 12, 'bold'),
                             bg='#e0e7ff', fg='#1e293b')
-        ref_label.pack(anchor='w', padx=10, pady=(0, 8))
+        ref_label.pack(anchor='w', padx=10, pady=(0, 6))
         
         # Status card
         status_card = tk.Frame(info_frame, bg='#fef3c7', relief=tk.FLAT)
         status_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
         
         tk.Label(status_card, text="Status", font=('Segoe UI', 8), 
-                bg='#fef3c7', fg='#92400e').pack(anchor='w', padx=10, pady=(8, 2))
+                bg='#fef3c7', fg='#92400e').pack(anchor='w', padx=10, pady=(6, 2))
         impl_label = tk.Label(status_card, text="", font=('Segoe UI', 12, 'bold'),
                              bg='#fef3c7', fg='#1e293b')
-        impl_label.pack(anchor='w', padx=10, pady=(0, 8))
+        impl_label.pack(anchor='w', padx=10, pady=(0, 6))
         
-        # Content
+        # Content - REDUCED HEIGHT
         content_frame = tk.Frame(dlg, bg='white', relief=tk.FLAT)
-        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=8)  # Reduced padding
         
         tk.Label(content_frame, text="Punch Description:", font=('Segoe UI', 9, 'bold'),
-                bg='white', fg='#64748b', anchor='w').pack(fill=tk.X, padx=15, pady=(10, 5))
+                bg='white', fg='#64748b', anchor='w').pack(fill=tk.X, padx=15, pady=(8, 3))
         
-        text_widget = tk.Text(content_frame, wrap=tk.WORD, height=14, 
+        # REDUCED text widget height
+        text_widget = tk.Text(content_frame, wrap=tk.WORD, height=9,  # Reduced from 14 to 9
                              font=('Segoe UI', 10), bg='#f8fafc',
-                             relief=tk.FLAT, padx=10, pady=10)
-        text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 15))
+                             relief=tk.FLAT, padx=10, pady=8)
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
         text_widget.config(state=tk.DISABLED)
 
         pos = [0]
@@ -1929,15 +2150,28 @@ class CircuitInspector:
             text_widget.config(state=tk.NORMAL)
             text_widget.delete("1.0", tk.END)
             text_widget.insert(tk.END, p['punch_text'])
-            text_widget.insert(tk.END, f"\n\n───────────────────────\n")
+            text_widget.insert(tk.END, f"\n\n──────────────────\n")
             text_widget.insert(tk.END, f"Category: {p['category']}\n")
-            text_widget.insert(tk.END, f"Implementation: {'YES' if p['implemented'] else 'NO'}\n")
 
+            # Find annotation for implementation remarks
             ann = next((a for a in self.annotations if a.get('sr_no') == p['sr_no']), None)
             if ann and ann.get('implementation_remark'):
-                text_widget.insert(tk.END, f"\n───────────────────────\n")
+                text_widget.insert(tk.END, f"\n──────────────────\n")
                 text_widget.insert(tk.END, "Implementation Remarks:\n")
                 text_widget.insert(tk.END, ann['implementation_remark'])
+            
+            # NEW: Check for production remarks from handover database
+            try:
+                # Try to find production remarks for this cabinet
+                handover_data = self.handover_db.get_handover_by_cabinet(self.cabinet_id)
+                if handover_data and handover_data.get('production_remarks'):
+                    text_widget.insert(tk.END, f"\n\n──────────────────\n")
+                    text_widget.insert(tk.END, "🔧 Production Remarks:\n")
+                    text_widget.insert(tk.END, handover_data['production_remarks'])
+                    text_widget.insert(tk.END, f"\n\nRework by: {handover_data.get('rework_completed_by', 'N/A')}")
+                    text_widget.insert(tk.END, f"\nDate: {handover_data.get('rework_completed_date', 'N/A')[:10]}")
+            except Exception as e:
+                print(f"Could not load production remarks: {e}")
 
             text_widget.config(state=tk.DISABLED)
 
@@ -2004,33 +2238,43 @@ class CircuitInspector:
                 pos[0] -= 1
                 show_item()
 
-        # Modern button frame
-        btn_frame = tk.Frame(dlg, bg='#f8fafc')
-        btn_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+        # EXPANDED: Button frame with MORE SPACE
+        btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)  # Fixed height
+        btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))  # More bottom padding
+        btn_frame.pack_propagate(False)  # Prevent shrinking
         
+        # Button container centered vertically
+        btn_container = tk.Frame(btn_frame, bg='#f8fafc')
+        btn_container.pack(expand=True)
+        
+        # LARGER button style
         btn_style = {
-            'font': ('Segoe UI', 10, 'bold'),
+            'font': ('Segoe UI', 12, 'bold'),  # Bigger font
             'relief': tk.FLAT,
             'borderwidth': 0,
             'cursor': 'hand2',
-            'padx': 20,
-            'pady': 12
+            'padx': 35,   # More horizontal padding
+            'pady': 18,   # More vertical padding
+            'width': 15   # Fixed width in characters
         }
 
-        tk.Button(btn_frame, text="◀ Previous", command=prev_item, bg='#94a3b8', 
-                 fg='white', width=12, **btn_style).pack(side=tk.LEFT, padx=5)
+        # Create buttons with consistent sizing
+        tk.Button(btn_container, text="◀  Previous", command=prev_item, 
+                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
         
-        tk.Button(btn_frame, text="✓ CLOSE PUNCH", command=close_punch, bg='#10b981', 
-                 fg='white', width=16, **btn_style).pack(side=tk.LEFT, padx=5)
+        # Main action button - slightly larger
+        close_btn_style = btn_style.copy()
+        close_btn_style['width'] = 18
+        tk.Button(btn_container, text="✓  CLOSE PUNCH", command=close_punch, 
+                 bg='#10b981', fg='white', **close_btn_style).pack(side=tk.LEFT, padx=8)
         
-        tk.Button(btn_frame, text="Next ▶", command=next_item, bg='#94a3b8', 
-                 fg='white', width=12, **btn_style).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_container, text="Next  ▶", command=next_item, 
+                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
         
-        tk.Button(btn_frame, text="Cancel", command=dlg.destroy, 
-                 bg='#64748b', fg='white', width=10, **btn_style).pack(side=tk.RIGHT, padx=5)
+        tk.Button(btn_container, text="Cancel", command=dlg.destroy, 
+                 bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
 
         dlg.wait_window()
-
     def read_open_punches_from_excel(self):
         """Reads punch sheet and returns list of open punches."""
         punches = []
@@ -2066,6 +2310,7 @@ class CircuitInspector:
             row += 1
 
         wb.close()
+        self.sync_manager_stats()
         return punches
 
     # ================================================================
@@ -2074,19 +2319,6 @@ class CircuitInspector:
 
     def ask_project_details(self):
         """Ask for project details including storage location"""
-        # Check if project exists in database
-        if self.db.project_exists(self.cabinet_id):
-            project = self.db.get_project(self.cabinet_id)
-            resume = messagebox.askyesno(
-                "Existing Project",
-                f"Project '{project['cabinet_id']}' already exists.\n"
-                f"Location: {project['storage_location']}\n\n"
-                "Resume this project?"
-            )
-            if resume:
-                self.load_existing_project(project)
-                return
-        
         dlg = tk.Toplevel(self.root)
         dlg.title("Project Details")
         dlg.geometry("500x380")
@@ -2099,13 +2331,14 @@ class CircuitInspector:
 
         tk.Label(dlg, text="Project Name", font=('Segoe UI', 10, 'bold')).pack(anchor="w", padx=20, pady=(10, 0))
         project_var = tk.StringVar(value=self.project_name)
-        tk.Entry(dlg, textvariable=project_var, font=('Segoe UI', 10)).pack(fill="x", padx=20)
+        project_entry = tk.Entry(dlg, textvariable=project_var, font=('Segoe UI', 10))
+        project_entry.pack(fill="x", padx=20)
 
         tk.Label(dlg, text="Sales Order Number", font=('Segoe UI', 10, 'bold')).pack(anchor="w", padx=20, pady=(10, 0))
         so_var = tk.StringVar(value=self.sales_order_no)
         tk.Entry(dlg, textvariable=so_var, font=('Segoe UI', 10)).pack(fill="x", padx=20)
 
-        # NEW: Storage Location Selection
+        # Storage Location Frame
         tk.Label(dlg, text="Storage Location", font=('Segoe UI', 10, 'bold')).pack(anchor="w", padx=20, pady=(15, 0))
         
         location_frame = tk.Frame(dlg)
@@ -2124,9 +2357,27 @@ class CircuitInspector:
             if folder:
                 location_var.set(folder)
         
-        tk.Button(location_frame, text="Browse...", command=browse_location,
-                 bg='#3b82f6', fg='white', font=('Segoe UI', 9, 'bold'),
-                 relief=tk.FLAT, padx=15, pady=5).pack(side=tk.RIGHT)
+        browse_btn = tk.Button(location_frame, text="Browse...", command=browse_location,
+                              bg='#3b82f6', fg='white', font=('Segoe UI', 9, 'bold'),
+                              relief=tk.FLAT, padx=15, pady=5)
+        browse_btn.pack(side=tk.RIGHT)
+
+        # Auto-load location when project name changes
+        def on_project_name_change(*args):
+            project_name = project_var.get().strip()
+            if project_name:
+                # Check database for existing project location
+                existing_location = self.db.get_project_location(project_name)
+                if existing_location:
+                    location_var.set(existing_location)
+                    # Show visual feedback
+                    location_entry.config(bg='#dcfce7')  # Light green
+                    dlg.after(1000, lambda: location_entry.config(bg='white'))
+                else:
+                    location_var.set("")
+        
+        # Bind the trace to project name entry
+        project_var.trace('w', on_project_name_change)
 
         def on_ok():
             cabinet = cabinet_var.get().strip()
@@ -2134,22 +2385,56 @@ class CircuitInspector:
             so = so_var.get().strip()
             location = location_var.get().strip()
             
-            if not cabinet or not project or not location:
+            if not cabinet or not project:
                 messagebox.showerror("Missing Information", 
-                                   "Please fill in all required fields and select a storage location.")
+                                   "Please fill in Cabinet ID and Project Name.")
                 return
+            
+            # Check if this cabinet already exists in database
+            if self.db.project_exists(cabinet):
+                existing = self.db.get_project(cabinet)
+                
+                # If it's the same project, use existing location
+                if existing['project_name'] == project:
+                    location = existing['storage_location']
+                    messagebox.showinfo("Existing Cabinet", 
+                                      f"Cabinet '{cabinet}' found in project '{project}'.\n"
+                                      f"Using existing location:\n{location}")
+                else:
+                    messagebox.showerror("Error", 
+                                       f"Cabinet ID '{cabinet}' already exists in different project:\n"
+                                       f"{existing['project_name']}")
+                    return
+            else:
+                # New cabinet - check if project exists with different cabinet
+                existing_project_location = self.db.get_project_location(project)
+                
+                if existing_project_location:
+                    # Project exists, use its location
+                    location = existing_project_location
+                    messagebox.showinfo("Existing Project", 
+                                      f"Project '{project}' found.\n"
+                                      f"Using existing location:\n{location}")
+                else:
+                    # Brand new project - must have location
+                    if not location:
+                        messagebox.showerror("Missing Location", 
+                                           "This is a new project. Please select a storage location.")
+                        return
             
             self.cabinet_id = cabinet
             self.project_name = project
             self.sales_order_no = so
             self.storage_location = location
             
-            # Save to database
+            # Save to database with all paths
             self.db.add_project({
                 'cabinet_id': self.cabinet_id,
                 'project_name': self.project_name,
                 'sales_order_no': self.sales_order_no,
                 'storage_location': self.storage_location,
+                'pdf_path': self.current_pdf_path if hasattr(self, 'current_pdf_path') else None,
+                'excel_path': self.excel_file if hasattr(self, 'excel_file') else None,
                 'created_date': datetime.now().isoformat(),
                 'last_accessed': datetime.now().isoformat()
             })
@@ -2195,29 +2480,41 @@ class CircuitInspector:
             messagebox.showerror("Excel Error", f"Failed to write project details:\n{e}")
 
     def prepare_project_folders(self):
-        """Prepare project folders at user-selected location"""
-        if not self.storage_location:
+        """Prepare project folders at user-selected location
+        Structure: storage_location/project_name/cabinet_id/...
+        """
+        if not hasattr(self, 'storage_location') or not self.storage_location:
             messagebox.showerror("Error", "Storage location not set")
-            return
+            return False
         
-        # Create project folder at selected location
-        project_root = os.path.join(
+        if not self.project_name or not self.cabinet_id:
+            messagebox.showerror("Error", "Project name and Cabinet ID required")
+            return False
+        
+        # Create structure: storage_location/project_name/cabinet_id/
+        project_folder = os.path.join(
             self.storage_location,
-            f"{self.cabinet_id.replace(' ', '_')}"
+            self.project_name.replace(' ', '_')
+        )
+        
+        cabinet_root = os.path.join(
+            project_folder,
+            self.cabinet_id.replace(' ', '_')
         )
         
         folders = {
-            "root": project_root,
-            "working_excel": os.path.join(project_root, "Working_Excel"),
-            "interphase_export": os.path.join(project_root, "Interphase_Export"),
-            "annotated_drawings": os.path.join(project_root, "Annotated_Drawings"),
-            "sessions": os.path.join(project_root, "Sessions")
+            "root": cabinet_root,
+            "working_excel": os.path.join(cabinet_root, "Working_Excel"),
+            "interphase_export": os.path.join(cabinet_root, "Interphase_Export"),
+            "annotated_drawings": os.path.join(cabinet_root, "Annotated_Drawings"),
+            "sessions": os.path.join(cabinet_root, "Sessions")
         }
         
         for p in folders.values():
             os.makedirs(p, exist_ok=True)
         
         self.project_dirs = folders
+        return True
 
     def get_session_path_for_pdf(self):
         if not self.current_pdf_path:
@@ -2264,8 +2561,12 @@ class CircuitInspector:
 
         wb = load_workbook(checklist_path)
         ws = wb[self.interphase_sheet_name]
+        
+        # EXTRACT ALL COLUMNS
         status_col = cols['status_col']
-        date_col = cols['date_col']  # NEW
+        date_col = cols['date_col']
+        name_col = cols['name_col']      # ADD THIS
+        remark_col = cols['remark_col']
 
         # Modern dialog window
         dlg = tk.Toplevel(self.root)
@@ -2371,7 +2672,7 @@ class CircuitInspector:
             """Handle N/A status with mandatory remark"""
             r, ref_str, desc = matches[pos[0]]
             
-            # NEW: Mandatory remark dialog for N/A
+            # Mandatory remark dialog for N/A
             remark = simpledialog.askstring(
                 "Remark Required",
                 "N/A status requires a remark.\nPlease provide a reason:",
@@ -2395,10 +2696,11 @@ class CircuitInspector:
                 except:
                     username = getpass.getuser()
                 
+                # Write all columns properly
                 self.write_cell(ws, r, status_col, "N/A")
                 self.write_cell(ws, r, date_col, current_date)
-                self.write_cell(ws, r, name_col, username)  # NEW: Write name
-                self.write_cell(ws, r, remark_col, remark)  # NEW: Write remark
+                self.write_cell(ws, r, name_col, username)
+                self.write_cell(ws, r, remark_col, remark)
                 wb.save(checklist_path)
                 
                 messagebox.showinfo("Remark Saved", 
@@ -2424,6 +2726,7 @@ class CircuitInspector:
                                   icon='info',
                                   parent=dlg)
                 dlg.destroy()
+
 
         def on_prev():
             if pos[0] > 0:
@@ -2486,7 +2789,7 @@ class CircuitInspector:
         status_col = self.interphase_cols['status']
         name_col = self.interphase_cols['name']
         date_col = self.interphase_cols['date']
-        remark_col = self.interphase_cols['remark']  # NEW
+        remark_col = self.interphase_cols['remark']
 
         matches = []
         max_row = ws.max_row if ws.max_row else 2000
@@ -2517,7 +2820,7 @@ class CircuitInspector:
             'status_col': status_col,
             'name_col': name_col,
             'date_col': date_col,
-            'remark_col': remark_col  # NEW
+            'remark_col': remark_col
         }, matches    
 
     # ================================================================
@@ -2694,13 +2997,20 @@ class CircuitInspector:
             "handed_over_date": datetime.now().isoformat()
         }
         
-        # Use database instead of JSON
-        success = self.db.add_quality_handover(handover_data)
+        # FIXED: Use handover_db instead of db
+        success = self.handover_db.add_quality_handover(handover_data)
+        
+        # FIXED: Use correct method name
+        self.manager_db.update_status(self.cabinet_id, 'handed_to_production')
         
         if success:
-            messagebox.showinfo("Handover Complete", "✓ Successfully handed over to Production")
+            messagebox.showinfo("Handover Complete", 
+                              "✓ Successfully handed over to Production\n\n"
+                              f"Cabinet: {self.cabinet_id}\n"
+                              f"Open Punches: {open_punches}")
         else:
-            messagebox.showwarning("Already Handed Over", "Cabinet already in production queue")
+            messagebox.showwarning("Already Handed Over", 
+                                 "Cabinet already in production queue")
 
     def count_open_punches(self) -> int:
         """Count open punches in current Excel"""
@@ -2735,6 +3045,75 @@ class CircuitInspector:
     # ================================================================
     # VIEW PRODUCTION HANDBACK ITEMS
     # ================================================================
+
+    def sync_manager_stats(self):
+        """Sync current cabinet statistics to manager database"""
+        if not self.pdf_document or not self.cabinet_id:
+            return
+        
+        try:
+            # Count pages with annotations
+            annotated_pages = len(set(ann['page'] for ann in self.annotations if ann.get('page') is not None))
+            total_pages = len(self.pdf_document)
+            
+            # Count punches by type
+            error_anns = [a for a in self.annotations if a.get('type') == 'error']
+            total_punches = len(error_anns)
+            
+            # Count from Excel for accuracy
+            open_punches = self.count_open_punches()
+            
+            # Count implemented (has implemented_name but no closed_name)
+            implemented_punches = 0
+            closed_punches = 0
+            
+            if self.excel_file and os.path.exists(self.excel_file):
+                try:
+                    from openpyxl import load_workbook
+                    wb = load_workbook(self.excel_file, data_only=True)
+                    ws = wb[self.punch_sheet_name] if self.punch_sheet_name in wb.sheetnames else wb.active
+                    
+                    row = 8
+                    while row <= ws.max_row + 5:
+                        sr = self.read_cell(ws, row, self.punch_cols['sr_no'])
+                        if sr is None:
+                            break
+                        
+                        implemented = self.read_cell(ws, row, self.punch_cols['implemented_name'])
+                        closed = self.read_cell(ws, row, self.punch_cols['closed_name'])
+                        
+                        if closed:
+                            closed_punches += 1
+                        elif implemented:
+                            implemented_punches += 1
+                        
+                        row += 1
+                    
+                    wb.close()
+                except:
+                    pass
+            
+            # Update manager database
+            self.manager_db.update_cabinet(
+                self.cabinet_id,
+                self.project_name,
+                self.sales_order_no,
+                total_pages,
+                annotated_pages,
+                total_punches,
+                open_punches,
+                implemented_punches,
+                closed_punches,
+                'quality_inspection'
+            )
+        except Exception as e:
+            print(f"Manager sync error: {e}")
+
+            
+    # ============================================================================
+    # UPDATED: view_production_handbacks - Auto-open punch closing
+    # ============================================================================
+
     def view_production_handbacks(self):
         """View and verify items returned from production"""
         
@@ -2751,7 +3130,7 @@ class CircuitInspector:
         # Create modern dialog
         dlg = tk.Toplevel(self.root)
         dlg.title("Production Handback - Verification")
-        dlg.geometry("900x600")
+        dlg.geometry("1000x600")
         dlg.configure(bg='#f8fafc')
         dlg.transient(self.root)
         dlg.grab_set()
@@ -2765,9 +3144,17 @@ class CircuitInspector:
                 bg='#7c3aed', fg='white', 
                 font=('Segoe UI', 14, 'bold')).pack(pady=15)
         
+        # Info bar
+        info_frame = tk.Frame(dlg, bg='#eff6ff')
+        info_frame.pack(fill=tk.X, padx=20, pady=(15, 5))
+        
+        tk.Label(info_frame, text=f"Total items pending verification: {len(pending_items)}", 
+                bg='#eff6ff', fg='#1e40af', 
+                font=('Segoe UI', 10, 'bold')).pack(pady=8)
+        
         # Listbox frame
         list_frame = tk.Frame(dlg, bg='white')
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         
         tk.Label(list_frame, text="Select item to verify:", 
                 font=('Segoe UI', 10, 'bold'),
@@ -2777,7 +3164,7 @@ class CircuitInspector:
         scrollbar = tk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        listbox = tk.Listbox(list_frame, font=('Segoe UI', 10),
+        listbox = tk.Listbox(list_frame, font=('Consolas', 9),
                             yscrollcommand=scrollbar.set,
                             bg='#f8fafc', relief=tk.FLAT,
                             selectmode=tk.SINGLE, height=15)
@@ -2803,68 +3190,52 @@ class CircuitInspector:
             
             # Load the project
             try:
-                # Load PDF
-                self.pdf_document = fitz.open(item['pdf_path'])
-                self.current_pdf_path = item['pdf_path']
-                self.current_page = 0
+                project_data = self.db.get_project(item['cabinet_id'])
+                if not project_data:
+                    messagebox.showerror("Error", "Project not found in database")
+                    return
                 
-                # Set project details
                 self.cabinet_id = item['cabinet_id']
                 self.project_name = item['project_name']
                 self.sales_order_no = item['sales_order_no']
+                self.storage_location = project_data['storage_location']
                 
-                # Prepare folders
                 self.prepare_project_folders()
                 
-                # Set Excel
+                if not os.path.exists(item['pdf_path']):
+                    messagebox.showerror("Error", f"PDF file not found:\n{item['pdf_path']}")
+                    return
+                
+                self.pdf_document = fitz.open(item['pdf_path'])
+                self.current_pdf_path = item['pdf_path']
+                self.current_page = 0
+                self.zoom_level = 1.0
+                self.tool_mode = None
+                self.root.config(cursor="")
+                
                 self.excel_file = item['excel_path']
                 self.working_excel_path = item['excel_path']
                 
-                # Load session if available
-                if item['session_path'] and os.path.exists(item['session_path']):
+                self.current_sr_no = self.get_next_sr_no()
+                
+                if item.get('session_path') and os.path.exists(item['session_path']):
                     self.load_session_from_path(item['session_path'])
                 else:
                     self.annotations = []
                     self.display_page()
                 
+                # UPDATED: Set status to "Rework being verified"
+                self.manager_db.update_status(self.cabinet_id, 'being_closed_by_quality')
+                
                 dlg.destroy()
                 
-                # Show verification dialog
-                self.verify_production_work(item)
+                # UPDATED: Auto-open punch closing dialog
+                self.verify_production_work_with_punch_closing(item)
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load item:\n{e}")
-        
-        def verify_and_close():
-            selection = listbox.curselection()
-            if not selection:
-                messagebox.showwarning("No Selection", "Please select an item first.")
-                return
-            
-            item = pending_items[selection[0]]
-            
-            # Get user name
-            try:
-                username = os.getlogin()
-            except:
-                username = getpass.getuser()
-            
-            # Verify
-            success = self.handover_db.update_quality_verification(
-                item['cabinet_id'],
-                status="closed",
-                user=username
-            )
-            
-            if success:
-                messagebox.showinfo(
-                    "Verified",
-                    f"✓ {item['cabinet_id']} verified and closed.",
-                    icon='info'
-                )
-                dlg.destroy()
-            else:
-                messagebox.showerror("Error", "Failed to verify item.")
+                import traceback
+                traceback.print_exc()
         
         # Buttons
         btn_frame = tk.Frame(dlg, bg='#f8fafc')
@@ -2881,48 +3252,554 @@ class CircuitInspector:
         tk.Button(btn_frame, text="📂 Load & Verify", command=load_selected,
                  bg='#3b82f6', fg='white', **btn_style).pack(side=tk.LEFT, padx=5)
         
-        tk.Button(btn_frame, text="✓ Quick Verify & Close", command=verify_and_close,
-                 bg='#10b981', fg='white', **btn_style).pack(side=tk.LEFT, padx=5)
+        # REMOVED: Quick Verify button as requested
         
         tk.Button(btn_frame, text="Cancel", command=dlg.destroy,
                  bg='#64748b', fg='white', **btn_style).pack(side=tk.RIGHT, padx=5)
-
-
-    def verify_production_work(self, item_data):
-        """Show verification dialog after loading production item"""
         
-        result = messagebox.askyesnocancel(
-            "Verify Production Work",
+        listbox.bind('<Double-Button-1>', lambda e: load_selected())
+
+
+    # ============================================================================
+    # NEW: verify_production_work_with_punch_closing - Auto-open punch closing
+    # ============================================================================
+
+    def verify_production_work_with_punch_closing(self, item_data):
+        """Auto-open punch closing mode after loading production item"""
+        
+        # Count open punches
+        open_count = self.count_open_punches()
+        
+        # Show initial info
+        info_msg = (
             f"Cabinet: {item_data['cabinet_id']}\n"
             f"Project: {item_data['project_name']}\n\n"
-            f"Rework completed by: {item_data['rework_completed_by']}\n"
+            f"Rework by: {item_data['rework_completed_by']}\n"
             f"Date: {item_data['rework_completed_date'][:10]}\n\n"
-            f"Production Remarks:\n{item_data.get('production_remarks', 'None')}\n\n"
-            "Verify and close this item?\n\n"
-            "Yes = Verify & Close\n"
-            "No = Keep open for inspection\n"
-            "Cancel = Return to list",
-            icon='question'
+            f"Open Punches: {open_count}\n\n"
+            f"Opening Punch Closing Mode..."
         )
         
-        if result is True:
-            # Verify and close
-            try:
-                username = os.getlogin()
-            except:
-                username = getpass.getuser()
+        messagebox.showinfo("Production Handback Loaded", info_msg, icon='info')
+        
+        # Auto-open punch closing mode
+        if open_count > 0:
+            self.punch_closing_mode_for_verification(item_data)
+        else:
+            # No punches - directly ask to close
+            self.finalize_verification(item_data)
+
+
+    # ============================================================================
+    # NEW: punch_closing_mode_for_verification - Modified punch closing for handback
+    # ============================================================================
+
+    def punch_closing_mode_for_verification(self, item_data):
+        """Punch closing mode specifically for verification workflow"""
+        
+        punches = self.read_open_punches_from_excel()
+        
+        if not punches:
+            # All closed, proceed to finalization
+            self.finalize_verification(item_data)
+            return
+        
+        punches.sort(key=lambda p: (not p['implemented'], p['sr_no']))
+        
+        # Dialog
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Punch Verification Mode")
+        dlg.geometry("950x600")
+        dlg.configure(bg='#f8fafc')
+        dlg.transient(self.root)
+        dlg.grab_set()
+        
+        # Header
+        header_frame = tk.Frame(dlg, bg='#7c3aed', height=50)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        tk.Label(header_frame, text="✓ Punch Verification Mode", 
+                bg='#7c3aed', fg='white', 
+                font=('Segoe UI', 13, 'bold')).pack(pady=12)
+        
+        # Progress
+        progress_frame = tk.Frame(dlg, bg='#f8fafc')
+        progress_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
+        
+        idx_label = tk.Label(progress_frame, text="", font=('Segoe UI', 10, 'bold'),
+                            bg='#f8fafc', fg='#1e293b')
+        idx_label.pack()
+        
+        # Info cards
+        info_frame = tk.Frame(dlg, bg='#f8fafc')
+        info_frame.pack(fill=tk.X, padx=20, pady=8)
+        
+        sr_card = tk.Frame(info_frame, bg='#dbeafe', relief=tk.FLAT)
+        sr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        tk.Label(sr_card, text="SR No.", font=('Segoe UI', 8), 
+                bg='#dbeafe', fg='#1e40af').pack(anchor='w', padx=10, pady=(6, 2))
+        sr_label = tk.Label(sr_card, text="", font=('Segoe UI', 12, 'bold'),
+                           bg='#dbeafe', fg='#1e293b')
+        sr_label.pack(anchor='w', padx=10, pady=(0, 6))
+        
+        ref_card = tk.Frame(info_frame, bg='#e0e7ff', relief=tk.FLAT)
+        ref_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        tk.Label(ref_card, text="Reference", font=('Segoe UI', 8), 
+                bg='#e0e7ff', fg='#4338ca').pack(anchor='w', padx=10, pady=(6, 2))
+        ref_label = tk.Label(ref_card, text="", font=('Segoe UI', 12, 'bold'),
+                            bg='#e0e7ff', fg='#1e293b')
+        ref_label.pack(anchor='w', padx=10, pady=(0, 6))
+        
+        status_card = tk.Frame(info_frame, bg='#fef3c7', relief=tk.FLAT)
+        status_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        
+        tk.Label(status_card, text="Status", font=('Segoe UI', 8), 
+                bg='#fef3c7', fg='#92400e').pack(anchor='w', padx=10, pady=(6, 2))
+        impl_label = tk.Label(status_card, text="", font=('Segoe UI', 12, 'bold'),
+                             bg='#fef3c7', fg='#1e293b')
+        impl_label.pack(anchor='w', padx=10, pady=(0, 6))
+        
+        # Content
+        content_frame = tk.Frame(dlg, bg='white', relief=tk.FLAT)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=8)
+        
+        tk.Label(content_frame, text="Punch Description:", font=('Segoe UI', 9, 'bold'),
+                bg='white', fg='#64748b', anchor='w').pack(fill=tk.X, padx=15, pady=(8, 3))
+        
+        text_widget = tk.Text(content_frame, wrap=tk.WORD, height=9,
+                             font=('Segoe UI', 10), bg='#f8fafc',
+                             relief=tk.FLAT, padx=10, pady=8)
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
+        text_widget.config(state=tk.DISABLED)
+
+        pos = [0]
+
+        def show_item():
+            p = punches[pos[0]]
             
-            self.handover_db.update_quality_verification(
-                item_data['cabinet_id'],
-                status="closed",
-                user=username
+            progress_text = f"Item {pos[0]+1} of {len(punches)}"
+            progress_pct = f"({int((pos[0]+1)/len(punches)*100)}% complete)"
+            idx_label.config(text=f"{progress_text} {progress_pct}")
+            
+            sr_label.config(text=str(p['sr_no']))
+            ref_label.config(text=str(p['ref_no']))
+            
+            impl_status = "✓ Implemented" if p['implemented'] else "⚠ Not Implemented"
+            impl_color = '#10b981' if p['implemented'] else '#f59e0b'
+            impl_label.config(text=impl_status, fg=impl_color)
+            
+            text_widget.config(state=tk.NORMAL)
+            text_widget.delete("1.0", tk.END)
+            text_widget.insert(tk.END, p['punch_text'])
+            text_widget.insert(tk.END, f"\n\n──────────────────\n")
+            text_widget.insert(tk.END, f"Category: {p['category']}\n")
+
+            ann = next((a for a in self.annotations if a.get('sr_no') == p['sr_no']), None)
+            if ann and ann.get('implementation_remark'):
+                text_widget.insert(tk.END, f"\n──────────────────\n")
+                text_widget.insert(tk.END, "Implementation Remarks:\n")
+                text_widget.insert(tk.END, ann['implementation_remark'])
+            
+            # Show production remarks
+            try:
+                handover_data = self.handover_db.get_handover_by_cabinet(self.cabinet_id)
+                if handover_data and handover_data.get('production_remarks'):
+                    text_widget.insert(tk.END, f"\n\n──────────────────\n")
+                    text_widget.insert(tk.END, "🔧 Production Remarks:\n")
+                    text_widget.insert(tk.END, handover_data['production_remarks'])
+                    text_widget.insert(tk.END, f"\n\nRework by: {handover_data.get('rework_completed_by', 'N/A')}")
+                    text_widget.insert(tk.END, f"\nDate: {handover_data.get('rework_completed_date', 'N/A')[:10]}")
+            except Exception as e:
+                print(f"Could not load production remarks: {e}")
+
+            text_widget.config(state=tk.DISABLED)
+
+        show_item()
+
+        def close_punch():
+            p = punches[pos[0]]
+
+            try:
+                default_user = os.getlogin()
+            except:
+                default_user = getpass.getuser()
+
+            name = simpledialog.askstring("Closed By", 
+                                         "Enter your name to close this punch:", 
+                                         initialvalue=default_user, 
+                                         parent=dlg)
+            if not name:
+                return
+
+            try:
+                wb = load_workbook(self.excel_file)
+                ws = wb[self.punch_sheet_name]
+
+                self.write_cell(ws, p['row'], self.punch_cols['closed_name'], name)
+                self.write_cell(ws, p['row'], self.punch_cols['closed_date'], 
+                              datetime.now().strftime("%Y-%m-%d"))
+
+                wb.save(self.excel_file)
+                wb.close()
+
+            except PermissionError:
+                messagebox.showerror("File Locked", 
+                                   "⚠️ Please close the Excel file and try again.")
+                return
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to close punch:\n{e}")
+                return
+
+            ann = next((a for a in self.annotations if a.get('excel_row') == p['row']), None)
+            if ann:
+                ann['type'] = 'ok'
+                ann['closed_by'] = name
+                ann['closed_date'] = datetime.now().strftime("%Y-%m-%d")
+
+            self.display_page()
+
+            if pos[0] < len(punches) - 1:
+                pos[0] += 1
+                show_item()
+            else:
+                messagebox.showinfo("All Punches Closed", 
+                                  f"✓ All punches verified and closed!\n{len(punches)} items processed.",
+                                  icon='info')
+                dlg.destroy()
+                # Proceed to finalization
+                self.finalize_verification(item_data)
+
+        def next_item():
+            if pos[0] < len(punches) - 1:
+                pos[0] += 1
+                show_item()
+
+        def prev_item():
+            if pos[0] > 0:
+                pos[0] -= 1
+                show_item()
+
+        # Buttons
+        btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)
+        btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))
+        btn_frame.pack_propagate(False)
+        
+        btn_container = tk.Frame(btn_frame, bg='#f8fafc')
+        btn_container.pack(expand=True)
+        
+        btn_style = {
+            'font': ('Segoe UI', 12, 'bold'),
+            'relief': tk.FLAT,
+            'borderwidth': 0,
+            'cursor': 'hand2',
+            'padx': 35,
+            'pady': 18,
+            'width': 15
+        }
+
+        tk.Button(btn_container, text="◀  Previous", command=prev_item, 
+                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+        
+        close_btn_style = btn_style.copy()
+        close_btn_style['width'] = 18
+        tk.Button(btn_container, text="✓  CLOSE PUNCH", command=close_punch, 
+                 bg='#10b981', fg='white', **close_btn_style).pack(side=tk.LEFT, padx=8)
+        
+        tk.Button(btn_container, text="Next  ▶", command=next_item, 
+                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+        
+        tk.Button(btn_container, text="Cancel", command=dlg.destroy, 
+                 bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+
+        dlg.wait_window()
+
+
+    # ============================================================================
+    # NEW: finalize_verification - Check checklist, save Excel, export PDF
+    # ============================================================================
+
+    def finalize_verification(self, item_data):
+        """Final step: check checklist completeness, save Excel, export PDF"""
+        
+        # 1. Check checklist completeness
+        checklist_complete, incomplete_refs = self.check_checklist_completeness()
+        
+        if not checklist_complete:
+            warning_msg = (
+                f"⚠️ Checklist Incomplete!\n\n"
+                f"{len(incomplete_refs)} reference(s) without status:\n"
+                f"{', '.join(incomplete_refs[:10])}"
             )
+            if len(incomplete_refs) > 10:
+                warning_msg += f"\n... and {len(incomplete_refs) - 10} more"
+            
+            warning_msg += "\n\nDo you want to review the checklist now?"
+            
+            review = messagebox.askyesno("Incomplete Checklist", warning_msg, icon='warning')
+            if review:
+                self.review_checklist_now()
+                # After review, ask again if they want to finalize
+                retry = messagebox.askyesno(
+                    "Continue?",
+                    "Review complete. Proceed with closing the cabinet?",
+                    icon='question'
+                )
+                if not retry:
+                    return
+                
+                # Re-check completeness after review
+                checklist_complete, incomplete_refs = self.check_checklist_completeness()
+                if not checklist_complete:
+                    messagebox.showwarning(
+                        "Still Incomplete",
+                        f"Checklist still has {len(incomplete_refs)} incomplete item(s).\n"
+                        "Proceeding anyway...",
+                        icon='warning'
+                    )
+            else:
+                # User chose not to review - warn but allow to continue
+                proceed = messagebox.askyesno(
+                    "Continue Anyway?",
+                    "Checklist is incomplete. Continue with closing?",
+                    icon='warning'
+                )
+                if not proceed:
+                    return
+        
+        # 2. Confirm closing
+        confirm_msg = (
+            f"Cabinet: {item_data['cabinet_id']}\n"
+            f"Project: {item_data['project_name']}\n\n"
+            f"✓ All punches closed\n"
+            f"{'✓' if checklist_complete else '⚠'} Checklist {'complete' if checklist_complete else 'reviewed'}\n\n"
+            f"This will:\n"
+            f"• Save Interphase Excel\n"
+            f"• Export Annotated PDF\n"
+            f"• Mark cabinet as CLOSED\n\n"
+            f"Proceed?"
+        )
+        
+        confirm = messagebox.askyesno("Close Cabinet", confirm_msg, icon='question')
+        if not confirm:
+            return
+        
+        # 3. Save current session first
+        try:
+            self.save_session()
+        except Exception as e:
+            print(f"Session save warning: {e}")
+        
+        # 4. Auto-save Interphase Excel
+        try:
+            if not self.excel_file or not os.path.exists(self.excel_file):
+                messagebox.showerror("Error", "Working Excel file not found.")
+                return
+            
+            save_path = os.path.join(
+                self.project_dirs["interphase_export"],
+                f"{self.cabinet_id.replace(' ', '_')}_Interphase.xlsx"
+            )
+            
+            shutil.copy2(self.excel_file, save_path)
+            print(f"✓ Interphase Excel saved: {save_path}")
+            
+        except PermissionError:
+            messagebox.showerror("Error", "Excel file is open. Please close it and try again.")
+            return
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save Excel:\n{e}")
+            return
+        
+        # 5. Auto-export annotated PDF
+        try:
+            if not self.pdf_document:
+                messagebox.showerror("Error", "No PDF document loaded.")
+                return
+            
+            export_path = os.path.join(
+                self.project_dirs["annotated_drawings"],
+                f"{self.cabinet_id.replace(' ', '_')}_Annotated.pdf"
+            )
+            
+            # Create output PDF
+            out_doc = fitz.open()
+            for pnum in range(len(self.pdf_document)):
+                out_doc.insert_pdf(self.pdf_document, from_page=pnum, to_page=pnum)
+            
+            # Open Excel for SR No lookup
+            wb = None
+            ws = None
+            if self.excel_file and os.path.exists(self.excel_file):
+                try:
+                    wb = load_workbook(self.excel_file, data_only=True)
+                    ws = wb[self.punch_sheet_name]
+                except:
+                    pass
+            
+            # Draw annotations
+            for ann in self.annotations:
+                p = ann.get('page')
+                if p is None or p < 0 or p >= len(out_doc):
+                    continue
+                
+                target_page = out_doc[p]
+                ann_type = ann.get('type')
+                
+                # Rectangle annotations
+                if ann_type in ('ok', 'error') and 'bbox_page' in ann:
+                    x1, y1, x2, y2 = ann['bbox_page']
+                    rect = self.transform_bbox_for_rotation((x1, y1, x2, y2), target_page)
+                    
+                    if ann_type == 'ok':
+                        target_page.draw_rect(rect, color=(0, 1, 0), width=2)
+                    else:
+                        target_page.draw_rect(rect, color=(1, 0.55, 0), width=2)
+                    
+                    sr_text = None
+                    row = ann.get('excel_row')
+                    
+                    if row and ws:
+                        try:
+                            sr_val = self.read_cell(ws, row, self.punch_cols['sr_no'])
+                            if sr_val is not None:
+                                sr_text = f"Sr {sr_val}"
+                        except:
+                            sr_text = None
+                    
+                    if sr_text:
+                        text_pos = fitz.Point(rect.x0, max(rect.y0 - 12, rect.y0))
+                        try:
+                            target_page.insert_text(text_pos, sr_text, fontsize=8)
+                        except:
+                            pass
+                
+                # Pen strokes
+                elif ann_type == 'pen' and 'points' in ann:
+                    points = ann['points']
+                    if len(points) >= 2:
+                        transformed_points = [
+                            self.transform_point_for_rotation(pt, target_page) 
+                            for pt in points
+                        ]
+                        
+                        for i in range(len(transformed_points) - 1):
+                            p1 = transformed_points[i]
+                            p2 = transformed_points[i + 1]
+                            target_page.draw_line(p1, p2, color=(1, 0, 0), width=2)
+                
+                # Text annotations
+                elif ann_type == 'text' and 'pos_page' in ann:
+                    pos = ann['pos_page']
+                    text = ann.get('text', '')
+                    if text:
+                        text_point = self.transform_point_for_rotation(pos, target_page)
+                        try:
+                            target_page.insert_text(
+                                text_point, text,
+                                fontsize=10, color=(1, 0, 0),
+                                rotate=target_page.rotation
+                            )
+                        except:
+                            pass
+            
+            if wb:
+                wb.close()
+            
+            out_doc.save(export_path)
+            out_doc.close()
+            
+            print(f"✓ Annotated PDF exported: {export_path}")
+            
+        except PermissionError:
+            messagebox.showerror("Error", "PDF file is open. Please close it and try again.")
+            return
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export PDF:\n{e}")
+            return
+        
+        # 6. Update verification status
+        try:
+            username = os.getlogin()
+        except:
+            username = getpass.getuser()
+        
+        success = self.handover_db.update_quality_verification(
+            item_data['cabinet_id'],
+            status="closed",
+            user=username
+        )
+        
+        if success:
+            # Update manager status to 'closed'
+            self.manager_db.update_status(item_data['cabinet_id'], 'closed')
+            
+            # Sync final stats
+            self.sync_manager_stats()
             
             messagebox.showinfo(
-                "Verified",
-                f"✓ {item_data['cabinet_id']} verified successfully!",
+                "✓ Verification Complete",
+                f"Cabinet {item_data['cabinet_id']} successfully closed!\n\n"
+                f"✓ Interphase Excel saved\n"
+                f"✓ Annotated PDF exported\n"
+                f"✓ Status updated to CLOSED\n\n"
+                f"Files saved to:\n{self.project_dirs['root']}",
                 icon='info'
             )
+        else:
+            messagebox.showerror("Error", "Failed to update verification status.")
+
+
+    # ============================================================================
+    # NEW: check_checklist_completeness - Helper to check Interphase completion
+    # ============================================================================
+
+    def check_checklist_completeness(self):
+        """Check if all Interphase items have status (OK/NOK/N/A)
+        Returns: (is_complete: bool, incomplete_refs: list)
+        """
+        if not self.excel_file or not os.path.exists(self.excel_file):
+            return False, []
+        
+        try:
+            wb = load_workbook(self.excel_file, data_only=True)
+            if self.interphase_sheet_name not in wb.sheetnames:
+                wb.close()
+                return False, []
+            
+            ws = wb[self.interphase_sheet_name]
+            ref_col = self.interphase_cols['ref_no']
+            status_col = self.interphase_cols['status']
+            
+            incomplete_refs = []
+            max_row = ws.max_row if ws.max_row else 2000
+            
+            for r in range(11, max_row + 1):
+                ref_val = self.read_cell(ws, r, ref_col)
+                if ref_val is None:
+                    continue
+                
+                ref_str = str(ref_val).strip()
+                if not ref_str:
+                    continue
+                
+                status_val = self.read_cell(ws, r, status_col)
+                status_str = str(status_val).strip().lower() if status_val is not None else ''
+                
+                # Check if status is empty or invalid
+                if status_str not in ('ok', 'nok', 'n/a', 'na', 'not applicable'):
+                    incomplete_refs.append(ref_str)
+            
+            wb.close()
+            
+            is_complete = len(incomplete_refs) == 0
+            return is_complete, incomplete_refs
+            
+        except Exception as e:
+            print(f"Checklist check error: {e}")
+            return False, []
 
 
 

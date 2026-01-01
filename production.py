@@ -1,6 +1,6 @@
 """
-Complete Integration - Replace your entire production.py with this
-Integrates handover system + visual navigation to annotations
+Modern Production Tool - Complete Integration with Manager Dashboard
+Integrates handover system + visual navigation + manager status updates
 """
 
 import tkinter as tk
@@ -15,7 +15,9 @@ import sys
 import json
 import getpass
 import re
+import sqlite3
 from handover_database import HandoverDB
+from database_manager import DatabaseManager
 
 
 def get_app_base_dir():
@@ -25,7 +27,94 @@ def get_app_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-class CircuitInspector:
+class ManagerDB:
+    """Manager database integration for status tracking"""
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        """Initialize tables if they don't exist"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS cabinets (
+            cabinet_id TEXT PRIMARY KEY,
+            project_name TEXT,
+            sales_order_no TEXT,
+            total_pages INTEGER DEFAULT 0,
+            annotated_pages INTEGER DEFAULT 0,
+            total_punches INTEGER DEFAULT 0,
+            open_punches INTEGER DEFAULT 0,
+            implemented_punches INTEGER DEFAULT 0,
+            closed_punches INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'quality_inspection',
+            created_date TEXT,
+            last_updated TEXT
+        )''')
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS category_occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cabinet_id TEXT,
+            project_name TEXT,
+            category TEXT,
+            subcategory TEXT,
+            occurrence_date TEXT
+        )''')
+        
+        conn.commit()
+        conn.close()
+    
+    def update_cabinet(self, cabinet_id, project_name, sales_order_no, 
+                      total_pages, annotated_pages, total_punches, 
+                      open_punches, implemented_punches, closed_punches, status):
+        """Update cabinet statistics"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO cabinets 
+                (cabinet_id, project_name, sales_order_no, total_pages, annotated_pages,
+                 total_punches, open_punches, implemented_punches, closed_punches, status,
+                 created_date, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                        COALESCE((SELECT created_date FROM cabinets WHERE cabinet_id = ?), ?),
+                        ?)
+            ''', (cabinet_id, project_name, sales_order_no, total_pages, annotated_pages,
+                  total_punches, open_punches, implemented_punches, closed_punches, status,
+                  cabinet_id, datetime.now().isoformat(), datetime.now().isoformat()))
+            
+            conn.commit()
+            conn.close()
+            print(f"✓ Manager DB: Updated {cabinet_id} - Status: {status}")
+            return True
+        except Exception as e:
+            print(f"Manager DB update error: {e}")
+            return False
+    
+    def update_status(self, cabinet_id, status):
+        """Update cabinet status only"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE cabinets 
+                SET status = ?, last_updated = ?
+                WHERE cabinet_id = ?
+            ''', (status, datetime.now().isoformat(), cabinet_id))
+            
+            conn.commit()
+            conn.close()
+            print(f"✓ Manager DB: Status updated for {cabinet_id} → {status}")
+            return True
+        except Exception as e:
+            print(f"Status update error: {e}")
+            return False
+
+
+class ProductionTool:
     def __init__(self, root):
         self.root = root
         self.root.title("Production Tool")
@@ -38,21 +127,23 @@ class CircuitInspector:
         self.project_name = ""
         self.sales_order_no = ""
         self.cabinet_id = ""
+        self.storage_location = ""
         self.annotations = []
         
         base = get_app_base_dir()
-        self.master_excel_file = os.path.join(base, "Emerson.xlsx")
         
-        # Initialize handover database
+        # Initialize databases
         self.handover_db = HandoverDB(os.path.join(base, "handover_db.json"))
+        self.db = DatabaseManager(os.path.join(base, "inspection_tool.db"))
+        self.manager_db = ManagerDB(os.path.join(base, "manager.db"))  # ← MANAGER DB
 
         self.excel_file = None
         self.working_excel_path = None
-        self.checklist_file = self.excel_file
         self.zoom_level = 1.0
         self.current_sr_no = 1
         self.current_page_image = None
         self.session_refs = set()
+        self.project_dirs = {}
         
         # Visual navigation for production mode
         self.production_arrow_id = None
@@ -104,6 +195,66 @@ class CircuitInspector:
         self.current_sr_no = self.get_next_sr_no()
 
     # ================================================================
+    # MANAGER SYNC - PRODUCTION SPECIFIC
+    # ================================================================
+    
+    def sync_manager_stats(self):
+        """Sync current cabinet statistics to manager database"""
+        if not self.cabinet_id:
+            return
+        
+        try:
+            # Count from Excel
+            open_punches = self.count_open_punches()
+            
+            implemented_punches = 0
+            closed_punches = 0
+            total_punches = 0
+            
+            if self.excel_file and os.path.exists(self.excel_file):
+                try:
+                    wb = load_workbook(self.excel_file, data_only=True)
+                    ws = wb[self.punch_sheet_name] if self.punch_sheet_name in wb.sheetnames else wb.active
+                    
+                    row = 8
+                    while row <= ws.max_row + 5:
+                        sr = self.read_cell(ws, row, self.punch_cols['sr_no'])
+                        if sr is None:
+                            break
+                        
+                        total_punches += 1
+                        
+                        implemented = self.read_cell(ws, row, self.punch_cols['implemented_name'])
+                        closed = self.read_cell(ws, row, self.punch_cols['closed_name'])
+                        
+                        if closed:
+                            closed_punches += 1
+                        elif implemented:
+                            implemented_punches += 1
+                        
+                        row += 1
+                    
+                    wb.close()
+                except Exception as e:
+                    print(f"Excel read error: {e}")
+            
+            # Update manager database with production status
+            self.manager_db.update_cabinet(
+                self.cabinet_id,
+                self.project_name,
+                self.sales_order_no,
+                0,  # total_pages (not relevant in production)
+                0,  # annotated_pages
+                total_punches,
+                open_punches,
+                implemented_punches,
+                closed_punches,
+                'in_progress'  # Production status
+            )
+        except Exception as e:
+            print(f"Manager sync error: {e}")
+
+    # ================================================================
     # CELL HELPERS
     # ================================================================
     def split_cell(self, cell_ref):
@@ -136,80 +287,144 @@ class CircuitInspector:
         return ws.cell(row=target_row, column=target_col).value
 
     # ================================================================
-    # UI SETUP
+    # MODERN UI SETUP
     # ================================================================
     def setup_ui(self):
-        toolbar = tk.Frame(self.root, bg='#2c3e50', height=60)
+        """Setup modern professional UI"""
+        
+        # Main toolbar with modern styling
+        toolbar = tk.Frame(self.root, bg='#1e293b', height=70)
         toolbar.pack(side=tk.TOP, fill=tk.X)
         
-        menubar = Menu(self.root)
+        # Enhanced Menu Bar
+        menubar = Menu(self.root, bg='#1e293b', fg='white', activebackground='#3b82f6')
         self.root.config(menu=menubar)
         
         # File Menu
-        file_menu = Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="Open PDF", command=self.load_pdf)
-        file_menu.add_command(label="Load from Handover", command=self.load_from_handover_queue)
+        file_menu = Menu(menubar, tearoff=0, bg='#1e293b', fg='white', activebackground='#3b82f6')
+        menubar.add_cascade(label="📁 File", menu=file_menu)
+        file_menu.add_command(label="Load from Production Queue", command=self.load_from_handover_queue, accelerator="Ctrl+O")
         file_menu.add_separator()
-        file_menu.add_command(label="Open Excel", command=self.open_excel)
+        file_menu.add_command(label="Open Excel", command=self.open_excel, accelerator="Ctrl+E")
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         
         # Tools Menu
-        tools_menu = Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Tools", menu=tools_menu)
-        tools_menu.add_command(label="🏭 Production Mode", command=self.production_mode)
+        tools_menu = Menu(menubar, tearoff=0, bg='#1e293b', fg='white', activebackground='#3b82f6')
+        menubar.add_cascade(label="🛠️ Tools", menu=tools_menu)
+        tools_menu.add_command(label="🏭 Production Mode", command=self.production_mode, accelerator="Ctrl+P")
         tools_menu.add_separator()
-        tools_menu.add_command(label="✅ Complete Rework & Handback", command=self.complete_rework_handback)
-
-        btn_style = {'bg': '#3498db', 'fg': 'white', 'padx': 15, 'pady': 8, 'font': ('Arial', 10)}
-
-        tk.Button(toolbar, text="📁 Load PDF", command=self.load_pdf, **btn_style).pack(side=tk.LEFT, padx=5, pady=10)
+        tools_menu.add_command(label="✅ Complete & Handback", command=self.complete_rework_handback, accelerator="Ctrl+H")
         
-        tk.Button(toolbar, text="📦 Load from Queue", command=self.load_from_handover_queue,
-                 bg='#9b59b6', fg='white', padx=15, pady=8, font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5, pady=10)
-
-        self.page_label = tk.Label(toolbar, text="Page: 0/0", bg='#2c3e50', fg='white', font=('Arial', 10))
-        self.page_label.pack(side=tk.LEFT, padx=5)
+        # View Menu
+        view_menu = Menu(menubar, tearoff=0, bg='#1e293b', fg='white', activebackground='#3b82f6')
+        menubar.add_cascade(label="👁️ View", menu=view_menu)
+        view_menu.add_command(label="Zoom In", command=self.zoom_in, accelerator="Ctrl++")
+        view_menu.add_command(label="Zoom Out", command=self.zoom_out, accelerator="Ctrl+-")
+        view_menu.add_command(label="Reset Zoom", command=lambda: setattr(self, 'zoom_level', 1.0) or self.display_page())
         
-        tk.Button(toolbar, text="◀ Prev", command=self.prev_page, bg='#95a5a6', fg='white', padx=10, pady=8).pack(side=tk.LEFT, padx=5)
-        tk.Button(toolbar, text="Next ▶", command=self.next_page, bg='#95a5a6', fg='white', padx=10, pady=8).pack(side=tk.LEFT, padx=5)
-
-        tk.Button(toolbar, text="🔍+", command=self.zoom_in, bg='#27ae60', fg='white', padx=10, pady=8).pack(side=tk.LEFT, padx=(20, 2))
-        tk.Button(toolbar, text="🔍-", command=self.zoom_out, bg='#27ae60', fg='white', padx=10, pady=8).pack(side=tk.LEFT, padx=2)
-
-        tk.Button(toolbar, text="🏭 Production Mode", command=self.production_mode,
-                 bg='#e67e22', fg='white', padx=15, pady=8, font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+        # Keyboard shortcuts
+        self.root.bind_all("<Control-o>", lambda e: self.load_from_handover_queue())
+        self.root.bind_all("<Control-e>", lambda e: self.open_excel())
+        self.root.bind_all("<Control-p>", lambda e: self.production_mode())
+        self.root.bind_all("<Control-h>", lambda e: self.complete_rework_handback())
+        self.root.bind_all("<Control-plus>", lambda e: self.zoom_in())
+        self.root.bind_all("<Control-minus>", lambda e: self.zoom_out())
         
-        tk.Button(toolbar, text="✅ Handback to Quality", command=self.complete_rework_handback,
-                 bg='#16a085', fg='white', padx=15, pady=8, font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
-
-        canvas_frame = tk.Frame(self.root)
-        canvas_frame.pack(fill=tk.BOTH, expand=True)
-
+        # Modern button style
+        btn_style = {
+            'bg': '#3b82f6',
+            'fg': 'white',
+            'padx': 12,
+            'pady': 10,
+            'font': ('Segoe UI', 9, 'bold'),
+            'relief': tk.FLAT,
+            'borderwidth': 0,
+            'cursor': 'hand2'
+        }
+        
+        # Left section - Load operations
+        left_frame = tk.Frame(toolbar, bg='#1e293b')
+        left_frame.pack(side=tk.LEFT, padx=10, pady=10)
+        
+        tk.Button(left_frame, text="📦 Load from Queue", command=self.load_from_handover_queue,
+                 bg='#8b5cf6', fg='white', padx=15, pady=10, 
+                 font=('Segoe UI', 10, 'bold'), relief=tk.FLAT, 
+                 borderwidth=0, cursor='hand2').pack(side=tk.LEFT, padx=3)
+        
+        # Center section - Navigation
+        center_frame = tk.Frame(toolbar, bg='#1e293b')
+        center_frame.pack(side=tk.LEFT, padx=20)
+        
+        self.page_label = tk.Label(center_frame, text="Page: 0/0", bg='#1e293b', 
+                                  fg='white', font=('Segoe UI', 10, 'bold'))
+        self.page_label.pack(side=tk.LEFT, padx=10)
+        
+        nav_btn_style = btn_style.copy()
+        nav_btn_style['bg'] = '#64748b'
+        
+        tk.Button(center_frame, text="◀", command=self.prev_page, width=3, **nav_btn_style).pack(side=tk.LEFT, padx=2)
+        tk.Button(center_frame, text="▶", command=self.next_page, width=3, **nav_btn_style).pack(side=tk.LEFT, padx=2)
+        
+        # Zoom controls
+        zoom_frame = tk.Frame(center_frame, bg='#1e293b')
+        zoom_frame.pack(side=tk.LEFT, padx=15)
+        
+        zoom_btn_style = btn_style.copy()
+        zoom_btn_style['bg'] = '#10b981'
+        
+        tk.Button(zoom_frame, text="🔍+", command=self.zoom_in, width=4, **zoom_btn_style).pack(side=tk.LEFT, padx=2)
+        tk.Button(zoom_frame, text="🔍−", command=self.zoom_out, width=4, **zoom_btn_style).pack(side=tk.LEFT, padx=2)
+        
+        # Right section - Action buttons
+        right_frame = tk.Frame(toolbar, bg='#1e293b')
+        right_frame.pack(side=tk.RIGHT, padx=10, pady=10)
+        
+        tk.Button(right_frame, text="🏭 Production Mode", command=self.production_mode,
+                 bg='#f59e0b', fg='white', padx=15, pady=10, 
+                 font=('Segoe UI', 9, 'bold'), relief=tk.FLAT, 
+                 borderwidth=0, cursor='hand2').pack(side=tk.LEFT, padx=3)
+        
+        tk.Button(right_frame, text="✅ Handback to Quality", command=self.complete_rework_handback,
+                 bg='#10b981', fg='white', padx=15, pady=10, 
+                 font=('Segoe UI', 9, 'bold'), relief=tk.FLAT, 
+                 borderwidth=0, cursor='hand2').pack(side=tk.LEFT, padx=3)
+        
+        # Canvas with scrollbars
+        canvas_frame = tk.Frame(self.root, bg='#f1f5f9')
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        
         v_scrollbar = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL)
         v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         h_scrollbar = tk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL)
         h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-
-        self.canvas = tk.Canvas(canvas_frame, bg='#ecf0f1',
+        
+        self.canvas = tk.Canvas(canvas_frame, bg='#f8fafc',
                                yscrollcommand=v_scrollbar.set,
-                               xscrollcommand=h_scrollbar.set)
+                               xscrollcommand=h_scrollbar.set,
+                               highlightthickness=0)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
+        
         v_scrollbar.config(command=self.canvas.yview)
         h_scrollbar.config(command=self.canvas.xview)
-
-        self.canvas.bind("<ButtonPress-1>", self.on_left_press)
-        self.canvas.bind("<ButtonPress-3>", self.on_right_press)
+        
+        # Bind mouse events
         self.canvas.bind("<Double-Button-1>", self.on_double_left_zoom)
         self.canvas.bind("<Double-Button-3>", self.on_double_right_zoom)
+        
+        # Modern status bar
+        status_bar = tk.Frame(self.root, bg='#334155', height=40)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        instructions_text = "🏭 Production Tool | Load items from queue → Production Mode → Mark as done → Handback to Quality"
+        tk.Label(status_bar, text=instructions_text, bg='#334155', fg='#e2e8f0', 
+                 font=('Segoe UI', 9), pady=10).pack()
 
     # ================================================================
-    # LOAD FROM HANDOVER QUEUE
+    # LOAD FROM HANDOVER QUEUE - WITH STATUS UPDATE
     # ================================================================
     def load_from_handover_queue(self):
-        """Load item from production handover queue"""
+        """Load item from production handover queue with modern UI"""
         pending_items = self.handover_db.get_pending_production_items()
         
         if not pending_items:
@@ -219,42 +434,57 @@ class CircuitInspector:
                               icon='info')
             return
         
-        # Create selection dialog
+        # Create modern selection dialog
         dlg = tk.Toplevel(self.root)
-        dlg.title("Production Queue - Select Item")
-        dlg.geometry("900x500")
+        dlg.title("Production Queue")
+        dlg.geometry("1000x600")
+        dlg.configure(bg='#f8fafc')
         dlg.transient(self.root)
         dlg.grab_set()
         
         # Header
-        header = tk.Frame(dlg, bg='#9b59b6', height=50)
-        header.pack(fill=tk.X)
-        header.pack_propagate(False)
+        header_frame = tk.Frame(dlg, bg='#8b5cf6', height=60)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
         
-        tk.Label(header, text="📦 Production Queue", bg='#9b59b6', fg='white',
-                font=('Arial', 14, 'bold')).pack(pady=12)
+        tk.Label(header_frame, text="📦 Production Queue - Select Item", 
+                bg='#8b5cf6', fg='white', 
+                font=('Segoe UI', 14, 'bold')).pack(pady=15)
         
-        # Listbox
-        list_frame = tk.Frame(dlg)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        # Info bar
+        info_frame = tk.Frame(dlg, bg='#eff6ff')
+        info_frame.pack(fill=tk.X, padx=20, pady=(15, 5))
         
-        tk.Label(list_frame, text="Select item to load:", font=('Arial', 10, 'bold')).pack(anchor='w', pady=(0, 8))
+        tk.Label(info_frame, text=f"Total items in queue: {len(pending_items)}", 
+                bg='#eff6ff', fg='#1e40af', 
+                font=('Segoe UI', 10, 'bold')).pack(pady=8)
         
+        # Listbox frame
+        list_frame = tk.Frame(dlg, bg='white')
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        tk.Label(list_frame, text="Select item to load:", 
+                font=('Segoe UI', 10, 'bold'),
+                bg='white', fg='#1e293b').pack(anchor='w', pady=(0, 10))
+        
+        # Scrollbar and Listbox
         scrollbar = tk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         listbox = tk.Listbox(list_frame, font=('Consolas', 9),
                             yscrollcommand=scrollbar.set,
-                            selectmode=tk.SINGLE, height=15)
+                            bg='#f8fafc', relief=tk.FLAT,
+                            selectmode=tk.SINGLE, height=18)
         listbox.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=listbox.yview)
         
-        # Populate
+        # Populate listbox
         for item in pending_items:
             status_icon = "⚙️" if item['status'] == 'in_progress' else "📦"
             display = (
                 f"{status_icon} {item['cabinet_id']:20} | {item['project_name']:30} | "
-                f"Open Punches: {item['open_punches']:3} | By: {item['handed_over_by']:15}"
+                f"Punches: {item['open_punches']:3} | By: {item['handed_over_by']:15} | "
+                f"{item['handed_over_date'][:10]}"
             )
             listbox.insert(tk.END, display)
         
@@ -269,20 +499,27 @@ class CircuitInspector:
             self.load_handover_item(item)
         
         # Buttons
-        btn_frame = tk.Frame(dlg)
-        btn_frame.pack(fill=tk.X, padx=15, pady=(0, 15))
+        btn_frame = tk.Frame(dlg, bg='#f8fafc')
+        btn_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+        
+        btn_style = {
+            'font': ('Segoe UI', 10, 'bold'),
+            'relief': tk.FLAT,
+            'cursor': 'hand2',
+            'padx': 20,
+            'pady': 12
+        }
         
         tk.Button(btn_frame, text="📂 Load Selected", command=load_selected,
-                 bg='#3498db', fg='white', font=('Arial', 10, 'bold'),
-                 padx=20, pady=10).pack(side=tk.LEFT, padx=5)
+                 bg='#3b82f6', fg='white', **btn_style).pack(side=tk.LEFT, padx=5)
         
         tk.Button(btn_frame, text="Cancel", command=dlg.destroy,
-                 padx=20, pady=10).pack(side=tk.RIGHT, padx=5)
+                 bg='#64748b', fg='white', **btn_style).pack(side=tk.RIGHT, padx=5)
         
         listbox.bind('<Double-Button-1>', lambda e: load_selected())
 
     def load_handover_item(self, item):
-        """Load a specific handover item"""
+        """Load a specific handover item - WITH STATUS UPDATES"""
         try:
             # Verify files exist
             if not os.path.exists(item['pdf_path']):
@@ -295,6 +532,12 @@ class CircuitInspector:
                                    f"Excel not found:\n{item['excel_path']}")
                 return
             
+            # Get project from database to get storage location
+            project_data = self.db.get_project(item['cabinet_id'])
+            if not project_data:
+                messagebox.showerror("Error", "Project not found in database")
+                return
+            
             # Load PDF
             self.pdf_document = fitz.open(item['pdf_path'])
             self.current_pdf_path = item['pdf_path']
@@ -305,6 +548,7 @@ class CircuitInspector:
             self.cabinet_id = item['cabinet_id']
             self.project_name = item['project_name']
             self.sales_order_no = item['sales_order_no']
+            self.storage_location = project_data['storage_location']
             
             # Prepare folders
             self.prepare_project_folders()
@@ -320,7 +564,7 @@ class CircuitInspector:
                 self.annotations = []
                 self.session_refs.clear()
             
-            # Mark as in progress
+            # Mark as in progress in handover DB
             try:
                 username = os.getlogin()
             except:
@@ -331,6 +575,12 @@ class CircuitInspector:
                 status='in_progress',
                 user=username
             )
+            
+            # ✅ UPDATE MANAGER STATUS TO "IN_PROGRESS"
+            self.manager_db.update_status(self.cabinet_id, 'in_progress')
+            
+            # ✅ SYNC INITIAL STATS TO MANAGER
+            self.sync_manager_stats()
             
             self.display_page()
             
@@ -346,12 +596,14 @@ class CircuitInspector:
             
         except Exception as e:
             messagebox.showerror("Load Error", f"Failed to load item:\n{e}")
+            import traceback
+            traceback.print_exc()
 
     # ================================================================
-    # COMPLETE REWORK & HANDBACK
+    # COMPLETE REWORK & HANDBACK - WITH STATUS UPDATES
     # ================================================================
     def complete_rework_handback(self):
-        """Complete rework and handback to Quality"""
+        """Complete rework and handback to Quality - WITH STATUS UPDATES"""
         if not self.pdf_document or not self.excel_file:
             messagebox.showwarning("No Item Loaded", 
                                  "Please load an item from the production queue first.")
@@ -407,6 +659,12 @@ class CircuitInspector:
         success = self.handover_db.add_production_handback(handback_data)
         
         if success:
+            # ✅ SYNC FINAL STATS TO MANAGER
+            self.sync_manager_stats()
+            
+            # ✅ UPDATE MANAGER STATUS TO "BEING_CLOSED_BY_QUALITY"
+            self.manager_db.update_status(self.cabinet_id, 'being_closed_by_quality')
+            
             messagebox.showinfo(
                 "Handback Complete",
                 f"✓ Successfully handed back to Quality:\n\n"
@@ -458,77 +716,129 @@ class CircuitInspector:
             return 0
 
     # ================================================================
-    # ENHANCED PRODUCTION MODE WITH VISUAL NAVIGATION
+    # ENHANCED PRODUCTION MODE WITH VISUAL NAVIGATION - MODERN UI
     # ================================================================
     def production_mode(self):
-        """Enhanced production mode with visual navigation to annotations"""
+        """Enhanced production mode with visual navigation and modern UI"""
         if not self.pdf_document or not self.excel_file:
-            messagebox.showwarning("No Item", "Please load a PDF and Excel file first.")
+            messagebox.showwarning("No Item", "Please load an item from the production queue first.")
             return
         
         punches = self.read_open_punches_from_excel()
 
         if not punches:
-            messagebox.showinfo("No Punches", "✓ All punches are closed!")
+            messagebox.showinfo("No Punches", 
+                              "✓ All punches are closed!\n"
+                              "You can now handback to Quality.",
+                              icon='info')
             return
 
         punches.sort(key=lambda p: (p['implemented'], p['sr_no']))
 
+        # Modern dialog
         dlg = tk.Toplevel(self.root)
         dlg.title("Production Mode")
-        dlg.geometry("800x500")
+        dlg.geometry("900x550")
+        dlg.configure(bg='#f8fafc')
         dlg.transient(self.root)
+        dlg.grab_set()
         
         self.production_dialog_open = True
 
         # Header
-        header = tk.Frame(dlg, bg='#e67e22', height=50)
-        header.pack(fill=tk.X)
-        header.pack_propagate(False)
+        header_frame = tk.Frame(dlg, bg='#f59e0b', height=60)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
         
-        tk.Label(header, text="🏭 PRODUCTION MODE", bg='#e67e22', fg='white',
-                font=('Arial', 14, 'bold')).pack(pady=12)
-
-        idx_label = tk.Label(dlg, text="", font=('Arial', 11, 'bold'))
-        idx_label.pack(pady=(10, 0))
+        tk.Label(header_frame, text="🏭 PRODUCTION MODE", 
+                bg='#f59e0b', fg='white', 
+                font=('Segoe UI', 14, 'bold')).pack(pady=15)
         
-        # Info frame
-        info_frame = tk.Frame(dlg, bg='#ecf0f1')
-        info_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Progress
+        progress_frame = tk.Frame(dlg, bg='#f8fafc')
+        progress_frame.pack(fill=tk.X, padx=20, pady=(15, 5))
         
-        sr_label = tk.Label(info_frame, text="", font=('Arial', 10), bg='#ecf0f1')
-        sr_label.pack(side=tk.LEFT, padx=10, pady=5)
+        idx_label = tk.Label(progress_frame, text="", font=('Segoe UI', 11, 'bold'),
+                            bg='#f8fafc', fg='#1e293b')
+        idx_label.pack()
         
-        ref_label = tk.Label(info_frame, text="", font=('Arial', 10), bg='#ecf0f1')
-        ref_label.pack(side=tk.LEFT, padx=10, pady=5)
+        # Info cards
+        info_frame = tk.Frame(dlg, bg='#f8fafc')
+        info_frame.pack(fill=tk.X, padx=20, pady=10)
         
-        impl_label = tk.Label(info_frame, text="", font=('Arial', 10), bg='#ecf0f1')
-        impl_label.pack(side=tk.LEFT, padx=10, pady=5)
-
-        text_widget = tk.Text(dlg, wrap=tk.WORD, height=14, font=('Arial', 10))
-        text_widget.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        # SR Number card
+        sr_card = tk.Frame(info_frame, bg='#dbeafe', relief=tk.FLAT)
+        sr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        tk.Label(sr_card, text="SR No.", font=('Segoe UI', 8), 
+                bg='#dbeafe', fg='#1e40af').pack(anchor='w', padx=10, pady=(8, 2))
+        sr_label = tk.Label(sr_card, text="", font=('Segoe UI', 12, 'bold'),
+                           bg='#dbeafe', fg='#1e293b')
+        sr_label.pack(anchor='w', padx=10, pady=(0, 8))
+        
+        # Reference card
+        ref_card = tk.Frame(info_frame, bg='#e0e7ff', relief=tk.FLAT)
+        ref_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        tk.Label(ref_card, text="Reference", font=('Segoe UI', 8), 
+                bg='#e0e7ff', fg='#4338ca').pack(anchor='w', padx=10, pady=(8, 2))
+        ref_label = tk.Label(ref_card, text="", font=('Segoe UI', 12, 'bold'),
+                            bg='#e0e7ff', fg='#1e293b')
+        ref_label.pack(anchor='w', padx=10, pady=(0, 8))
+        
+        # Status card
+        status_card = tk.Frame(info_frame, bg='#fef3c7', relief=tk.FLAT)
+        status_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        
+        tk.Label(status_card, text="Status", font=('Segoe UI', 8), 
+                bg='#fef3c7', fg='#92400e').pack(anchor='w', padx=10, pady=(8, 2))
+        impl_label = tk.Label(status_card, text="", font=('Segoe UI', 12, 'bold'),
+                             bg='#fef3c7', fg='#1e293b')
+        impl_label.pack(anchor='w', padx=10, pady=(0, 8))
+        
+        # Content
+        content_frame = tk.Frame(dlg, bg='white', relief=tk.FLAT)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        tk.Label(content_frame, text="Punch Description:", font=('Segoe UI', 9, 'bold'),
+                bg='white', fg='#64748b', anchor='w').pack(fill=tk.X, padx=15, pady=(10, 5))
+        
+        text_widget = tk.Text(content_frame, wrap=tk.WORD, height=12, 
+                             font=('Segoe UI', 10), bg='#f8fafc',
+                             relief=tk.FLAT, padx=10, pady=10)
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 15))
         text_widget.config(state=tk.DISABLED)
 
         pos = [0]
 
         def show_item():
             p = punches[pos[0]]
-
-            idx_label.config(text=f"Item {pos[0]+1} of {len(punches)}")
-            sr_label.config(text=f"SR No: {p['sr_no']}")
-            ref_label.config(text=f"Ref: {p['ref_no']}")
+            
+            # Update progress
+            progress_text = f"Item {pos[0]+1} of {len(punches)}"
+            progress_pct = f"({int((pos[0]+1)/len(punches)*100)}% complete)"
+            idx_label.config(text=f"{progress_text} {progress_pct}")
+            
+            # Update info cards
+            sr_label.config(text=str(p['sr_no']))
+            ref_label.config(text=str(p['ref_no']))
+            
             impl_status = "✓ Implemented" if p['implemented'] else "⚠ Not Implemented"
-            impl_color = '#27ae60' if p['implemented'] else '#e74c3c'
+            impl_color = '#10b981' if p['implemented'] else '#f59e0b'
             impl_label.config(text=impl_status, fg=impl_color)
-
+            
+            # Update description
             text_widget.config(state=tk.NORMAL)
             text_widget.delete("1.0", tk.END)
             text_widget.insert(tk.END, p['punch_text'])
-            text_widget.insert(tk.END, f"\n\n───────────────────\nCategory: {p['category']}\n")
+            text_widget.insert(tk.END, f"\n\n───────────────────────\n")
+            text_widget.insert(tk.END, f"Category: {p['category']}\n")
+            text_widget.insert(tk.END, f"Implementation: {'YES' if p['implemented'] else 'NO'}\n")
 
             ann = next((a for a in self.annotations if a.get('excel_row') == p['row']), None)
             if ann and ann.get('implementation_remark'):
-                text_widget.insert(tk.END, "\n───────────────────\nPrevious Remarks:\n")
+                text_widget.insert(tk.END, f"\n───────────────────────\n")
+                text_widget.insert(tk.END, "Previous Remarks:\n")
                 text_widget.insert(tk.END, ann['implementation_remark'])
 
             text_widget.config(state=tk.DISABLED)
@@ -546,13 +856,15 @@ class CircuitInspector:
             except:
                 default_user = getpass.getuser()
 
-            name = simpledialog.askstring("Implemented By", "Enter your name:",
+            name = simpledialog.askstring("Implemented By", 
+                                         "Enter your name:",
                                          initialvalue=default_user, parent=dlg)
             if not name:
                 return
 
             remark = simpledialog.askstring("Remarks (optional)", 
-                                           "Add remarks (optional):", parent=dlg)
+                                           "Add remarks about the implementation (optional):", 
+                                           parent=dlg)
 
             try:
                 wb = load_workbook(self.excel_file)
@@ -565,10 +877,16 @@ class CircuitInspector:
                 wb.save(self.excel_file)
                 wb.close()
 
+            except PermissionError:
+                messagebox.showerror("File Locked", 
+                                   "⚠️ Please close the Excel file and try again.",
+                                   parent=dlg)
+                return
             except Exception as e:
-                messagebox.showerror("Excel Error", str(e))
+                messagebox.showerror("Excel Error", str(e), parent=dlg)
                 return
 
+            # Update annotation
             ann = next((a for a in self.annotations if a.get('sr_no') == p['sr_no']), None)
             if ann:
                 ann['implemented'] = True
@@ -580,7 +898,11 @@ class CircuitInspector:
                 pos[0] += 1
                 show_item()
             else:
-                messagebox.showinfo("Complete", "✓ All punches reviewed!")
+                messagebox.showinfo("Complete", 
+                                  "✓ All punches reviewed!\n"
+                                  "You can now handback to Quality.",
+                                  icon='info',
+                                  parent=dlg)
                 self.clear_production_visuals()
                 self.production_dialog_open = False
                 dlg.destroy()
@@ -602,18 +924,30 @@ class CircuitInspector:
 
         dlg.protocol("WM_DELETE_WINDOW", on_close)
 
-        btn_frame = tk.Frame(dlg)
-        btn_frame.pack(fill=tk.X, pady=10)
+        # Modern button frame
+        btn_frame = tk.Frame(dlg, bg='#f8fafc')
+        btn_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+        
+        btn_style = {
+            'font': ('Segoe UI', 10, 'bold'),
+            'relief': tk.FLAT,
+            'borderwidth': 0,
+            'cursor': 'hand2',
+            'padx': 20,
+            'pady': 12
+        }
 
-        tk.Button(btn_frame, text="◀ Prev", command=prev_item, width=10,
-                 padx=10, pady=8).pack(side=tk.LEFT, padx=6)
-        tk.Button(btn_frame, text="✓ DONE", command=mark_implemented, 
-                 bg="#27ae60", fg="white", width=14, font=('Arial', 10, 'bold'),
-                 padx=10, pady=8).pack(side=tk.LEFT, padx=6)
-        tk.Button(btn_frame, text="Next ▶", command=next_item, width=10,
-                 padx=10, pady=8).pack(side=tk.LEFT, padx=6)
-        tk.Button(btn_frame, text="Close", command=on_close,
-                 padx=10, pady=8).pack(side=tk.RIGHT, padx=6)
+        tk.Button(btn_frame, text="◀ Previous", command=prev_item, bg='#94a3b8', 
+                 fg='white', width=12, **btn_style).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(btn_frame, text="✓ MARK DONE", command=mark_implemented, 
+                 bg='#10b981', fg='white', width=16, **btn_style).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(btn_frame, text="Next ▶", command=next_item, bg='#94a3b8', 
+                 fg='white', width=12, **btn_style).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(btn_frame, text="Close", command=on_close, 
+                 bg='#64748b', fg='white', width=10, **btn_style).pack(side=tk.RIGHT, padx=5)
 
     def navigate_to_punch(self, sr_no, punch_text):
         """Navigate to annotation and highlight it visually"""
@@ -655,6 +989,7 @@ class CircuitInspector:
             # Draw arrow and highlight
             if 'bbox_page' in target_ann:
                 self.highlight_annotation(target_ann)
+                self._last_highlighted_ann = target_ann
 
     def highlight_annotation(self, annotation):
         """Draw visual indicators for the annotation"""
@@ -670,7 +1005,7 @@ class CircuitInspector:
         self.production_highlight_id = self.canvas.create_rectangle(
             x1 - padding, y1 - padding,
             x2 + padding, y2 + padding,
-            outline='#e74c3c', width=5, dash=(10, 5)
+            outline='#ef4444', width=5, dash=(10, 5)
         )
         
         # Draw arrow pointing to it
@@ -678,20 +1013,22 @@ class CircuitInspector:
         arrow_start_y = cy - 100
         self.production_arrow_id = self.canvas.create_line(
             arrow_start_x, arrow_start_y, cx - 15, cy - 15,
-            arrow=tk.LAST, fill='#e74c3c', width=4
+            arrow=tk.LAST, fill='#ef4444', width=4
         )
         
         # Add text label
         self.canvas.create_text(
             arrow_start_x - 10, arrow_start_y - 10,
             text=f"SR {annotation.get('sr_no', '?')}",
-            fill='#e74c3c', font=('Arial', 12, 'bold'),
+            fill='#ef4444', font=('Segoe UI', 12, 'bold'),
             anchor='se'
         )
         
         # Scroll to make it visible
-        self.canvas.yview_moveto(max(0, (y1 - 100) / max(1, self.canvas.bbox("all")[3])))
-        self.canvas.xview_moveto(max(0, (x1 - 100) / max(1, self.canvas.bbox("all")[2])))
+        bbox_all = self.canvas.bbox("all")
+        if bbox_all:
+            self.canvas.yview_moveto(max(0, (y1 - 100) / max(1, bbox_all[3])))
+            self.canvas.xview_moveto(max(0, (x1 - 100) / max(1, bbox_all[2])))
 
     def clear_production_visuals(self):
         """Clear production mode visual indicators"""
@@ -747,64 +1084,8 @@ class CircuitInspector:
         return punches
 
     # ================================================================
-    # PDF HELPERS
+    # PDF DISPLAY HELPERS
     # ================================================================
-    def load_pdf(self):
-        file_path = filedialog.askopenfilename(
-            title="Select Circuit Diagram PDF",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")]
-        )
-        if file_path:
-            try:
-                self.pdf_document = fitz.open(file_path)
-                self.current_pdf_path = file_path
-                self.current_page = 0
-                self.annotations = []
-                self.zoom_level = 1.0
-                self.current_sr_no = self.get_next_sr_no()
-                self.display_page()
-                messagebox.showinfo("Success", f"Loaded PDF with {len(self.pdf_document)} pages")
-                self.ask_project_details()
-                self.prepare_project_folders()
-                
-                try:
-                    self.working_excel_path = os.path.join(
-                        self.project_dirs["working_excel"],
-                        f"{self.cabinet_id.replace(' ', '_')}_Working.xlsx"
-                    )
-
-                    if os.path.exists(self.working_excel_path):
-                        resume = messagebox.askyesno(
-                            "Resume Inspection",
-                            f"Existing working Excel found:\n\n{os.path.basename(self.working_excel_path)}\n\n"
-                            "Resume previous inspection?"
-                        )
-                        if not resume:
-                            shutil.copy2(self.master_excel_file, self.working_excel_path)
-                    else:
-                        shutil.copy2(self.master_excel_file, self.working_excel_path)
-
-                    self.excel_file = self.working_excel_path
-
-                except Exception as e:
-                    messagebox.showerror("Excel Error", f"Failed to prepare working Excel:\n{e}")
-                    return
-                
-                self.write_project_details_to_excel()
-                
-                session_path = self.get_session_path_for_pdf()
-                if session_path:
-                    resume = messagebox.askyesno(
-                        "Resume Session",
-                        f"Existing session found for this drawing:\n\n{os.path.basename(session_path)}\n\n"
-                        "Do you want to resume it?"
-                    )
-                    if resume:
-                        self.load_session_from_path(session_path)
-
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load PDF: {str(e)}")
-
     def get_next_sr_no(self):
         try:
             if not self.excel_file or not os.path.exists(self.excel_file):
@@ -890,24 +1171,6 @@ class CircuitInspector:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to display page: {e}")
 
-    def on_left_press(self, event):
-        if not self.pdf_document:
-            messagebox.showwarning("Warning", "Please load a PDF first")
-            return
-        self.drawing = True
-        self.drawing_type = 'ok'
-        self.rect_start_x = self.canvas.canvasx(event.x)
-        self.rect_start_y = self.canvas.canvasy(event.y)
-
-    def on_right_press(self, event):
-        if not self.pdf_document:
-            messagebox.showwarning("Warning", "Please load a PDF first")
-            return
-        self.drawing = True
-        self.drawing_type = 'error'
-        self.rect_start_x = self.canvas.canvasx(event.x)
-        self.rect_start_y = self.canvas.canvasy(event.y)
-
     def zoom_at_point(self, canvas_x, canvas_y, zoom_delta):
         if not self.pdf_document:
             return
@@ -961,92 +1224,40 @@ class CircuitInspector:
     # ================================================================
     # PROJECT MANAGEMENT
     # ================================================================
-    def ask_project_details(self):
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Project Details")
-        dlg.geometry("420x260")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        tk.Label(dlg, text="Cabinet ID").pack(anchor="w", padx=20, pady=(15, 0))
-        cabinet_var = tk.StringVar(value=getattr(self, "cabinet_id", ""))
-        tk.Entry(dlg, textvariable=cabinet_var).pack(fill="x", padx=20)
-
-        tk.Label(dlg, text="Project Name").pack(anchor="w", padx=20, pady=(10, 0))
-        project_var = tk.StringVar(value=self.project_name)
-        tk.Entry(dlg, textvariable=project_var).pack(fill="x", padx=20)
-
-        tk.Label(dlg, text="Sales Order Number").pack(anchor="w", padx=20, pady=(10, 0))
-        so_var = tk.StringVar(value=self.sales_order_no)
-        tk.Entry(dlg, textvariable=so_var).pack(fill="x", padx=20)
-
-        def on_ok():
-            self.cabinet_id = cabinet_var.get().strip()
-            self.project_name = project_var.get().strip()
-            self.sales_order_no = so_var.get().strip()
-            dlg.destroy()
-
-        tk.Button(dlg, text="OK", command=on_ok, bg="#2ecc71", fg="white").pack(pady=20)
-        dlg.wait_window()
-
-    def write_project_details_to_excel(self):
-        if not self.excel_file or not os.path.exists(self.excel_file):
-            return
-
-        try:
-            wb = load_workbook(self.excel_file)
-
-            for sheet_name, cells in self.header_cells.items():
-                if sheet_name not in wb.sheetnames:
-                    continue
-
-                ws = wb[sheet_name]
-
-                if getattr(self, "project_name", ""):
-                    r, c = self.split_cell(cells["project_name"])
-                    self.write_cell(ws, r, c, self.project_name)
-
-                if getattr(self, "sales_order_no", ""):
-                    r, c = self.split_cell(cells["sales_order"])
-                    self.write_cell(ws, r, c, self.sales_order_no)
-
-                if getattr(self, "cabinet_id", ""):
-                    r, c = self.split_cell(cells["cabinet_id"])
-                    self.write_cell(ws, r, c, self.cabinet_id)
-
-            wb.save(self.excel_file)
-            wb.close()
-
-        except PermissionError:
-            messagebox.showerror("Excel Locked", 
-                               "Please close the Excel file before entering project details.")
-        except Exception as e:
-            messagebox.showerror("Excel Error", 
-                               f"Failed to write project details:\n{e}")
-
     def prepare_project_folders(self):
-        if not self.project_name:
-            raise ValueError("Project name not set")
-
-        safe_project = "".join(
-            c for c in self.project_name if c.isalnum() or c in (" ", "_", "-")
-        ).strip().replace(" ", "_")
-
-        base_dir = get_app_base_dir()
-        project_root = os.path.join(base_dir, safe_project)
-
+        """Prepare project folders at storage location"""
+        if not hasattr(self, 'storage_location') or not self.storage_location:
+            messagebox.showerror("Error", "Storage location not set")
+            return False
+        
+        if not self.project_name or not self.cabinet_id:
+            messagebox.showerror("Error", "Project name and Cabinet ID required")
+            return False
+        
+        # Create structure: storage_location/project_name/cabinet_id/
+        project_folder = os.path.join(
+            self.storage_location,
+            self.project_name.replace(' ', '_')
+        )
+        
+        cabinet_root = os.path.join(
+            project_folder,
+            self.cabinet_id.replace(' ', '_')
+        )
+        
         folders = {
-            "root": project_root,
-            "working_excel": os.path.join(project_root, "Working_Excel"),
-            "interphase_export": os.path.join(project_root, "Interphase_Export"),
-            "annotated_drawings": os.path.join(project_root, "Annotated_Drawings"),
-            "sessions": os.path.join(project_root, "Sessions")
+            "root": cabinet_root,
+            "working_excel": os.path.join(cabinet_root, "Working_Excel"),
+            "interphase_export": os.path.join(cabinet_root, "Interphase_Export"),
+            "annotated_drawings": os.path.join(cabinet_root, "Annotated_Drawings"),
+            "sessions": os.path.join(cabinet_root, "Sessions")
         }
-
+        
         for p in folders.values():
             os.makedirs(p, exist_ok=True)
-
+        
         self.project_dirs = folders
+        return True
 
     def open_excel(self):
         if not self.excel_file or not os.path.exists(self.excel_file):
@@ -1106,13 +1317,12 @@ class CircuitInspector:
                 self.session_refs.add(str(ann['ref_no']).strip())
 
         self.display_page()
-        messagebox.showinfo("Session Loaded", 
-                          f"Loaded {len(self.annotations)} annotations.")
+        print(f"Session loaded: {len(self.annotations)} annotations")
 
 
 def main():
     root = tk.Tk()
-    app = CircuitInspector(root)
+    app = ProductionTool(root)
     root.mainloop()
 
 

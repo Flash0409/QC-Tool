@@ -20,6 +20,26 @@ class DatabaseManager:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row  # Enable column access by name
         self.cursor = self.conn.cursor()
+
+    def get_project_location(self, project_name):
+        """Get storage location for an existing project name"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT storage_location FROM projects 
+                WHERE project_name = ? 
+                LIMIT 1
+            ''', (project_name,))
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            return result[0] if result else None
+        except Exception as e:
+            print(f"Error getting project location: {e}")
+            return None
     
     def _create_tables(self):
         """Create all required tables"""
@@ -129,25 +149,40 @@ class DatabaseManager:
             self._add_to_recent(project_data.get('cabinet_id'))
             return True
         except sqlite3.IntegrityError:
-            # Project already exists
-            return False
+            # Project already exists, try updating instead
+            try:
+                return self.update_project(
+                    project_data.get('cabinet_id'),
+                    {k: v for k, v in project_data.items() if k != 'cabinet_id'}
+                )
+            except:
+                return False
         except Exception as e:
             print(f"Error adding project: {e}")
+            import traceback
+            traceback.print_exc()
             self.conn.rollback()
             return False
     
     def update_project(self, cabinet_id: str, updates: Dict) -> bool:
-        """Update project information"""
+        """Update project information
+        
+        FIXED: Properly matches number of placeholders with values
+        """
         try:
             # Build dynamic UPDATE query
             set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
-            values = list(updates.values()) + [cabinet_id]
+            values = list(updates.values())
+            
+            # Add last_accessed and cabinet_id (for WHERE clause)
+            values.append(datetime.now().isoformat())
+            values.append(cabinet_id)
             
             self.cursor.execute(f"""
                 UPDATE projects 
                 SET {set_clause}, last_accessed = ?
                 WHERE cabinet_id = ?
-            """, values + [datetime.now().isoformat(), cabinet_id])
+            """, values)
             
             self.conn.commit()
             
@@ -156,6 +191,8 @@ class DatabaseManager:
             return True
         except Exception as e:
             print(f"Error updating project: {e}")
+            import traceback
+            traceback.print_exc()
             self.conn.rollback()
             return False
     
