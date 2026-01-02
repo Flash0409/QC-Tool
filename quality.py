@@ -684,7 +684,7 @@ class CircuitInspector:
             self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
             self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
             self.page_label.config(text=f"Page: {self.current_page + 1}/{len(self.pdf_document)}")
-            self.sync_manager_stats()
+            self.sync_manager_stats_only()
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to display page: {e}")
@@ -737,7 +737,7 @@ class CircuitInspector:
                 entry['pos_page'] = [float(pos[0]), float(pos[1])]
 
             data['annotations'].append(entry)
-        self.sync_manager_stats()
+        self.sync_manager_stats_only()
 
         try:
             with open(save_path, 'w', encoding='utf-8') as f:
@@ -920,7 +920,7 @@ class CircuitInspector:
             out_doc.close()
 
             messagebox.showinfo("Success", f"Annotated PDF saved to:\n{save_path}")
-            self.sync_manager_stats()
+            self.sync_manager_stats_only()
 
         except PermissionError:
             messagebox.showerror("Error", "Close the target file (if open) and try again.")
@@ -1497,6 +1497,119 @@ class CircuitInspector:
     # ================================================================
     # PDF LOADING
     # ================================================================
+    def get_current_status_from_db(self):
+        """Get the current status of this cabinet from manager database"""
+        try:
+            conn = sqlite3.connect(self.manager_db.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT status FROM cabinets WHERE cabinet_id = ?
+            ''', (self.cabinet_id,))
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                return result[0]
+            else:
+                # New cabinet - default to quality_inspection
+                return 'quality_inspection'
+                
+        except Exception as e:
+            print(f"Error getting status: {e}")
+            return 'quality_inspection'  # Safe fallback
+    
+    
+    def sync_manager_stats_only(self):
+        """Sync ONLY statistics, don't touch status at all
+        Use this when you want to update counts without changing workflow status"""
+        if not self.pdf_document or not self.cabinet_id:
+            return
+        
+        try:
+            # Count pages with annotations
+            annotated_pages = len(set(ann['page'] for ann in self.annotations if ann.get('page') is not None))
+            total_pages = len(self.pdf_document)
+            
+            # Count punches
+            error_anns = [a for a in self.annotations if a.get('type') == 'error']
+            total_punches = len(error_anns)
+            open_punches = self.count_open_punches()
+            
+            # Count implemented and closed
+            implemented_punches = 0
+            closed_punches = 0
+            
+            if self.excel_file and os.path.exists(self.excel_file):
+                try:
+                    from openpyxl import load_workbook
+                    wb = load_workbook(self.excel_file, data_only=True)
+                    ws = wb[self.punch_sheet_name] if self.punch_sheet_name in wb.sheetnames else wb.active
+                    
+                    row = 8
+                    while row <= ws.max_row + 5:
+                        sr = self.read_cell(ws, row, self.punch_cols['sr_no'])
+                        if sr is None:
+                            break
+                        
+                        implemented = self.read_cell(ws, row, self.punch_cols['implemented_name'])
+                        closed = self.read_cell(ws, row, self.punch_cols['closed_name'])
+                        
+                        if closed:
+                            closed_punches += 1
+                        elif implemented:
+                            implemented_punches += 1
+                        
+                        row += 1
+                    
+                    wb.close()
+                except:
+                    pass
+            
+            # Update ONLY the statistics columns in database
+            conn = sqlite3.connect(self.manager_db.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE cabinets 
+                SET total_pages = ?,
+                    annotated_pages = ?,
+                    total_punches = ?,
+                    open_punches = ?,
+                    implemented_punches = ?,
+                    closed_punches = ?,
+                    last_updated = ?
+                WHERE cabinet_id = ?
+            ''', (total_pages, annotated_pages, total_punches, open_punches,
+                  implemented_punches, closed_punches, datetime.now().isoformat(),
+                  self.cabinet_id))
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            print(f"Stats sync error: {e}")
+    
+    
+    def update_status_and_sync(self, new_status):
+        """Update status and sync stats in one atomic operation
+        This is the RECOMMENDED approach for status changes"""
+        
+        if not self.cabinet_id:
+            return False
+        
+        try:
+            # First update status
+            self.manager_db.update_status(self.cabinet_id, new_status)
+            
+            # Then sync stats (which will now preserve the status we just set)
+            self.sync_manager_stats()
+            
+            return True
+        except Exception as e:
+            print(f"Update status and sync error: {e}")
+            return False
 
     def load_pdf(self):
         file_path = filedialog.askopenfilename(
@@ -1866,7 +1979,7 @@ class CircuitInspector:
                     component_type,
                     error_name
                 )
-                self.sync_manager_stats()
+                self.sync_manager_stats_only()
             except Exception as e:
                 print(f"Manager category logging failed: {e}")
 
@@ -1963,7 +2076,7 @@ class CircuitInspector:
                     custom_category,
                     None
                 )
-                self.sync_manager_stats()
+                self.sync_manager_stats_only()
             except Exception as e:
                 print(f"Manager category logging failed: {e}")
 
@@ -2310,7 +2423,6 @@ class CircuitInspector:
             row += 1
 
         wb.close()
-        self.sync_manager_stats()
         return punches
 
     # ================================================================
@@ -3001,7 +3113,7 @@ class CircuitInspector:
         success = self.handover_db.add_quality_handover(handover_data)
         
         # FIXED: Use correct method name
-        self.manager_db.update_status(self.cabinet_id, 'handed_to_production')
+        self.update_status_and_sync('handed_to_production')
         
         if success:
             messagebox.showinfo("Handover Complete", 
@@ -3047,7 +3159,7 @@ class CircuitInspector:
     # ================================================================
 
     def sync_manager_stats(self):
-        """Sync current cabinet statistics to manager database"""
+        """Sync current cabinet statistics to manager database WITHOUT changing status"""
         if not self.pdf_document or not self.cabinet_id:
             return
         
@@ -3093,7 +3205,10 @@ class CircuitInspector:
                 except:
                     pass
             
-            # Update manager database
+            # FIXED: Get existing status from database, don't override it
+            existing_status = self.get_current_status_from_db()
+            
+            # Update manager database with EXISTING status preserved
             self.manager_db.update_cabinet(
                 self.cabinet_id,
                 self.project_name,
@@ -3104,10 +3219,14 @@ class CircuitInspector:
                 open_punches,
                 implemented_punches,
                 closed_punches,
-                'quality_inspection'
+                existing_status,  # CHANGED: Use existing status instead of hardcoded 'quality_inspection'
+                storage_location=getattr(self, 'storage_location', None),
+                excel_path=self.excel_file
             )
         except Exception as e:
             print(f"Manager sync error: {e}")
+            import traceback
+            traceback.print_exc()
 
             
     # ============================================================================
@@ -3225,7 +3344,7 @@ class CircuitInspector:
                     self.display_page()
                 
                 # UPDATED: Set status to "Rework being verified"
-                self.manager_db.update_status(self.cabinet_id, 'being_closed_by_quality')
+                self.update_status_and_sync('being_closed_by_quality')
                 
                 dlg.destroy()
                 
@@ -3734,10 +3853,7 @@ class CircuitInspector:
         
         if success:
             # Update manager status to 'closed'
-            self.manager_db.update_status(item_data['cabinet_id'], 'closed')
-            
-            # Sync final stats
-            self.sync_manager_stats()
+            self.update_status_and_sync('closed')
             
             messagebox.showinfo(
                 "✓ Verification Complete",
@@ -3816,3 +3932,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
