@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 import json
 import os
 import sys
+import subprocess
 from datetime import datetime, timedelta
 from collections import defaultdict
 import sqlite3
@@ -48,6 +49,21 @@ class ManagerDatabase:
     def __init__(self, db_path):
         self.db_path = db_path
         self.init_database()
+        
+        # Excel column mapping (same as Quality Inspection tool)
+        self.punch_sheet_name = 'Punch Sheet'
+        self.punch_cols = {
+            'sr_no': 'A',
+            'ref_no': 'B',
+            'desc': 'C',
+            'category': 'D',
+            'checked_name': 'E',
+            'checked_date': 'F',
+            'implemented_name': 'G',
+            'implemented_date': 'H',
+            'closed_name': 'I',
+            'closed_date': 'J'
+        }
     
     def init_database(self):
         conn = sqlite3.connect(self.db_path)
@@ -65,7 +81,9 @@ class ManagerDatabase:
             closed_punches INTEGER DEFAULT 0,
             status TEXT DEFAULT 'quality_inspection',
             created_date TEXT,
-            last_updated TEXT)''')
+            last_updated TEXT,
+            storage_location TEXT,
+            excel_path TEXT)''')
         
         cursor.execute('''CREATE TABLE IF NOT EXISTS category_occurrences (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +95,105 @@ class ManagerDatabase:
         
         conn.commit()
         conn.close()
+    
+    def split_cell(self, cell_ref):
+        """Splits 'F6' -> (6, 'F')"""
+        import re
+        m = re.match(r"([A-Z]+)(\d+)", cell_ref)
+        if not m:
+            raise ValueError(f"Invalid cell reference: {cell_ref}")
+        col, row = m.groups()
+        return int(row), col
+    
+    def _resolve_merged_target(self, ws, row, col_idx):
+        """Handle merged cells"""
+        for merged in ws.merged_cells.ranges:
+            if merged.min_row <= row <= merged.max_row and merged.min_col <= col_idx <= merged.max_col:
+                return merged.min_row, merged.min_col
+        return row, col_idx
+    
+    def read_cell(self, ws, row, col):
+        """Read cell value handling merged cells"""
+        from openpyxl.utils import column_index_from_string
+        
+        if isinstance(col, str):
+            col_idx = column_index_from_string(col)
+        else:
+            col_idx = int(col)
+        target_row, target_col = self._resolve_merged_target(ws, int(row), col_idx)
+        return ws.cell(row=target_row, column=target_col).value
+    
+    def count_punches_from_excel(self, excel_path):
+        """Count punches directly from Excel file
+        Returns: (total, implemented, closed)
+        """
+        if not excel_path or not os.path.exists(excel_path):
+            return (0, 0, 0)
+        
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(excel_path, data_only=True)
+            
+            if self.punch_sheet_name not in wb.sheetnames:
+                wb.close()
+                return (0, 0, 0)
+            
+            ws = wb[self.punch_sheet_name]
+            
+            total = 0
+            implemented = 0
+            closed = 0
+            
+            # DEBUG: Track which rows we count
+            debug_info = {
+                'total_rows': [],
+                'implemented_rows': [],
+                'closed_rows': []
+            }
+            
+            row = 9  # Start from row 9 (changed from 8)
+            while row <= ws.max_row + 5:
+                # Check if this row has a punch (has checked_name)
+                checked = self.read_cell(ws, row, self.punch_cols['checked_name'])
+                
+                if checked:  # This is a logged punch
+                    total += 1
+                    debug_info['total_rows'].append(row)
+                    
+                    # Check if implemented
+                    impl = self.read_cell(ws, row, self.punch_cols['implemented_name'])
+                    if impl:
+                        implemented += 1
+                        debug_info['implemented_rows'].append(row)
+                    
+                    # Check if closed
+                    closed_val = self.read_cell(ws, row, self.punch_cols['closed_name'])
+                    if closed_val:
+                        closed += 1
+                        debug_info['closed_rows'].append(row)
+                
+                row += 1
+                
+                # Safety limit
+                if row > 2000:
+                    break
+            
+            wb.close()
+            
+            # DEBUG: Print what we found
+            print(f"\n=== DEBUG Excel Count for {os.path.basename(excel_path)} ===")
+            print(f"Total punches: {total} (rows: {debug_info['total_rows']})")
+            print(f"Implemented: {implemented} (rows: {debug_info['implemented_rows']})")
+            print(f"Closed: {closed} (rows: {debug_info['closed_rows']})")
+            print("="*60)
+            
+            return (total, implemented, closed)
+            
+        except Exception as e:
+            print(f"Error counting punches from Excel: {e}")
+            import traceback
+            traceback.print_exc()
+            return (0, 0, 0)
     
     def get_all_projects(self):
         conn = sqlite3.connect(self.db_path)
@@ -92,16 +209,35 @@ class ManagerDatabase:
         return projects
     
     def get_cabinets_by_project(self, project_name):
+        """Get cabinets with real-time Excel-based punch counts"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''SELECT cabinet_id, project_name, total_pages, annotated_pages,
-                          total_punches, open_punches, implemented_punches, closed_punches, status
+                          status, excel_path, storage_location
                           FROM cabinets
                           WHERE project_name = ?
                           ORDER BY last_updated DESC''', (project_name,))
-        cols = ['cabinet_id', 'project_name', 'total_pages', 'annotated_pages',
-                'total_punches', 'open_punches', 'implemented_punches', 'closed_punches', 'status']
-        cabinets = [dict(zip(cols, row)) for row in cursor.fetchall()]
+        
+        cabinets = []
+        for row in cursor.fetchall():
+            cabinet_id, project_name, total_pages, annotated_pages, status, excel_path, storage_location = row
+            
+            # Get real counts from Excel
+            total_punches, implemented_punches, closed_punches = self.count_punches_from_excel(excel_path)
+            
+            cabinets.append({
+                'cabinet_id': cabinet_id,
+                'project_name': project_name,
+                'total_pages': total_pages or 0,
+                'annotated_pages': annotated_pages or 0,
+                'total_punches': total_punches,
+                'implemented_punches': implemented_punches,
+                'closed_punches': closed_punches,
+                'status': status,
+                'excel_path': excel_path,
+                'storage_location': storage_location
+            })
+        
         conn.close()
         return cabinets
     
@@ -119,6 +255,92 @@ class ManagerDatabase:
                    for r in cursor.fetchall()]
         conn.close()
         return projects
+    
+    # ============ DATA DELETION METHODS ============
+    
+    def delete_cabinet(self, cabinet_id):
+        """Delete a specific cabinet and all its associated data"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Delete from cabinets table
+            cursor.execute('DELETE FROM cabinets WHERE cabinet_id = ?', (cabinet_id,))
+            
+            # Delete from category_occurrences table
+            cursor.execute('DELETE FROM category_occurrences WHERE cabinet_id = ?', (cabinet_id,))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error deleting cabinet: {e}")
+            return False
+    
+    def delete_project(self, project_name):
+        """Delete all cabinets for a specific project"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Delete from cabinets table
+            cursor.execute('DELETE FROM cabinets WHERE project_name = ?', (project_name,))
+            
+            # Delete from category_occurrences table
+            cursor.execute('DELETE FROM category_occurrences WHERE project_name = ?', (project_name,))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error deleting project: {e}")
+            return False
+    
+    def clear_all_data(self):
+        """Clear ALL data from dashboard (complete reset)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Clear all tables
+            cursor.execute('DELETE FROM cabinets')
+            cursor.execute('DELETE FROM category_occurrences')
+            
+            # Reset auto-increment
+            cursor.execute('DELETE FROM sqlite_sequence WHERE name="category_occurrences"')
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error clearing database: {e}")
+            return False
+    
+    def get_database_stats(self):
+        """Get statistics about database contents"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT COUNT(*) FROM cabinets')
+            total_cabinets = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(DISTINCT project_name) FROM cabinets')
+            total_projects = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM category_occurrences')
+            total_occurrences = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            return {
+                'total_cabinets': total_cabinets,
+                'total_projects': total_projects,
+                'total_occurrences': total_occurrences
+            }
+        except Exception as e:
+            print(f"Error getting stats: {e}")
+            return None
     
     def get_category_stats(self, start_date=None, end_date=None, project_name=None):
         """Get category stats with flexible date filtering"""
@@ -258,6 +480,11 @@ class ManagerUI:
                                                 command=self.show_categories,
                                                 bg='#334155', fg='white', **btn_style)
         self.nav_btns['categories'].pack(side=tk.LEFT, padx=5)
+        
+        self.nav_btns['management'] = tk.Button(nav, text="⚙️ Management",
+                                                command=self.show_management,
+                                                bg='#334155', fg='white', **btn_style)
+        self.nav_btns['management'].pack(side=tk.LEFT, padx=5)
         
         # Content frame
         self.content = tk.Frame(self.root, bg='#f8fafc')
@@ -474,9 +701,26 @@ class ManagerUI:
             row = tk.Frame(parent, bg='white')
             row.pack(fill=tk.X, pady=2)
             
-            # Cabinet ID
-            tk.Label(row, text=cab['cabinet_id'], font=('Segoe UI', 9),
-                    bg='white', width=18, anchor='w').pack(side=tk.LEFT, padx=3)
+            # Cabinet ID - CLICKABLE
+            cabinet_label = tk.Label(row, text=cab['cabinet_id'], font=('Segoe UI', 9, 'bold'),
+                    bg='white', fg='#3b82f6', width=18, anchor='w', cursor='hand2')
+            cabinet_label.pack(side=tk.LEFT, padx=3)
+            
+            # Make it clickable to open Excel
+            def open_excel(excel_path=cab.get('excel_path')):
+                self.open_excel_file(excel_path)
+            
+            cabinet_label.bind('<Button-1>', lambda e, ep=cab.get('excel_path'): self.open_excel_file(ep))
+            
+            # Add hover effect
+            def on_enter(e, lbl=cabinet_label):
+                lbl.config(fg='#1e40af', font=('Segoe UI', 9, 'bold', 'underline'))
+            
+            def on_leave(e, lbl=cabinet_label):
+                lbl.config(fg='#3b82f6', font=('Segoe UI', 9, 'bold'))
+            
+            cabinet_label.bind('<Enter>', on_enter)
+            cabinet_label.bind('<Leave>', on_leave)
             
             # Drawing completion percentage
             pct = (cab['annotated_pages']/cab['total_pages']*100) if cab['total_pages'] else 0
@@ -522,8 +766,28 @@ class ManagerUI:
                                  width=5, relief=tk.FLAT, cursor='hand2')
             debug_btn.pack(side=tk.LEFT, padx=3)
     
+    def open_excel_file(self, excel_path):
+        """Open Excel file in default application"""
+        if not excel_path or not os.path.exists(excel_path):
+            messagebox.showwarning("File Not Found", 
+                                 f"Excel file not found:\n{excel_path or 'No path specified'}")
+            return
+        
+        try:
+            if sys.platform == 'win32':
+                os.startfile(excel_path)
+            elif sys.platform == 'darwin':  # macOS
+                subprocess.Popen(['open', excel_path])
+            else:  # linux
+                subprocess.Popen(['xdg-open', excel_path])
+            
+            messagebox.showinfo("Opening Excel", 
+                              f"Opening:\n{os.path.basename(excel_path)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open Excel file:\n{e}")
+    
     def show_cabinet_debug(self, cabinet):
-        """Show debug information for a cabinet"""
+        """Show debug information for a cabinet - reads directly from Excel"""
         conn = sqlite3.connect(self.db.db_path)
         cursor = conn.cursor()
         
@@ -532,28 +796,43 @@ class ManagerUI:
                          WHERE cabinet_id = ?''', (cabinet['cabinet_id'],))
         actual_total = cursor.fetchone()[0]
         
+        # Read ACTUAL counts from Excel file
+        excel_path = cabinet.get('excel_path')
+        if excel_path and os.path.exists(excel_path):
+            excel_total, excel_implemented, excel_closed = self.db.count_punches_from_excel(excel_path)
+            excel_open = excel_total - excel_implemented - excel_closed
+            excel_status = "✓ File found and read"
+        else:
+            excel_total = excel_implemented = excel_closed = excel_open = 0
+            excel_status = "✗ File not found"
+        
         # Get detailed breakdown
         debug_info = f"""Cabinet Debug Information
         
 Cabinet ID: {cabinet['cabinet_id']}
 Project: {cabinet['project_name']}
 
-=== Stored in cabinets table ===
-Total Punches: {cabinet['total_punches']}
-Open: {cabinet['open_punches']}
+=== Excel File ===
+Path: {excel_path or 'Not specified'}
+Status: {excel_status}
+
+=== ACTUAL Counts from Excel ===
+Total Punches: {excel_total}
+Implemented: {excel_implemented}
+Closed: {excel_closed}
+Open: {excel_open}
+
+=== Stored in Database (OLD - may be outdated) ===
+Total: {cabinet['total_punches']}
 Implemented: {cabinet['implemented_punches']}
 Closed: {cabinet['closed_punches']}
-Sum: {cabinet['open_punches'] + cabinet['implemented_punches'] + cabinet['closed_punches']}
 
-=== Actual from category_occurrences ===
+=== Category Occurrences Table ===
 Total Logged Punches: {actual_total}
-
-=== Discrepancy ===
-Difference: {cabinet['total_punches'] - actual_total}
 
 """
         
-        # Get punch details
+        # Get punch details from category_occurrences
         cursor.execute('''SELECT category, subcategory, occurrence_date 
                          FROM category_occurrences 
                          WHERE cabinet_id = ?
@@ -561,22 +840,74 @@ Difference: {cabinet['total_punches'] - actual_total}
         punches = cursor.fetchall()
         
         if punches:
-            debug_info += "\n=== Logged Punches ===\n"
+            debug_info += "\n=== Logged Punches (from category_occurrences) ===\n"
             for idx, (cat, subcat, date) in enumerate(punches, 1):
                 debug_info += f"{idx}. {cat}"
                 if subcat:
                     debug_info += f" → {subcat}"
                 debug_info += f" ({date})\n"
         
+        # If Excel exists, show what's actually in the Excel file
+        if excel_path and os.path.exists(excel_path):
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(excel_path, data_only=True)
+                
+                if self.db.punch_sheet_name in wb.sheetnames:
+                    ws = wb[self.db.punch_sheet_name]
+                    
+                    debug_info += "\n=== Excel Row Details ===\n"
+                    row = 9  # Start from row 9 (changed from 8)
+                    punch_num = 1
+                    
+                    while row <= ws.max_row + 5 and row < 100:  # Limit to 100 rows
+                        checked = self.db.read_cell(ws, row, self.db.punch_cols['checked_name'])
+                        
+                        if checked:
+                            sr_no = self.db.read_cell(ws, row, self.db.punch_cols['sr_no'])
+                            ref_no = self.db.read_cell(ws, row, self.db.punch_cols['ref_no'])
+                            desc = self.db.read_cell(ws, row, self.db.punch_cols['desc'])
+                            impl = self.db.read_cell(ws, row, self.db.punch_cols['implemented_name'])
+                            closed_val = self.db.read_cell(ws, row, self.db.punch_cols['closed_name'])
+                            
+                            status = "CLOSED" if closed_val else ("IMPLEMENTED" if impl else "OPEN")
+                            
+                            debug_info += f"\nRow {row} - SR#{sr_no} Ref:{ref_no}\n"
+                            debug_info += f"  Status: {status}\n"
+                            debug_info += f"  Desc: {desc[:50]}...\n" if desc and len(str(desc)) > 50 else f"  Desc: {desc}\n"
+                            debug_info += f"  Checked: {checked}\n"
+                            if impl:
+                                debug_info += f"  Implemented: {impl}\n"
+                            if closed_val:
+                                debug_info += f"  Closed: {closed_val}\n"
+                            
+                            punch_num += 1
+                        
+                        row += 1
+                    
+                wb.close()
+            except Exception as e:
+                debug_info += f"\n=== Error reading Excel details ===\n{e}\n"
+        
         conn.close()
         
         # Show in a dialog
         debug_window = tk.Toplevel(self.root)
         debug_window.title(f"Debug: {cabinet['cabinet_id']}")
-        debug_window.geometry("600x500")
+        debug_window.geometry("700x600")
         
-        text_widget = tk.Text(debug_window, wrap=tk.WORD, font=('Courier New', 10))
-        text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Add scrollbar
+        scroll_frame = tk.Frame(debug_window)
+        scroll_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        scrollbar = tk.Scrollbar(scroll_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        text_widget = tk.Text(scroll_frame, wrap=tk.WORD, font=('Courier New', 9),
+                             yscrollcommand=scrollbar.set)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_widget.yview)
+        
         text_widget.insert('1.0', debug_info)
         text_widget.config(state=tk.DISABLED)
         
@@ -1692,6 +2023,296 @@ Difference: {cabinet['total_punches'] - actual_total}
             category['subcategories'].remove(sub)
             self.save_categories()
             self.show_categories()
+    
+    # ============ MANAGEMENT PAGE - DELETE & CLEAR DATA ============
+    
+    def show_management(self):
+        """Management page for deleting data and clearing database"""
+        self.set_active_nav('management')
+        self.clear_content()
+        
+        # Centered container
+        center_container = tk.Frame(self.content, bg='#f8fafc')
+        center_container.place(relx=0.5, rely=0, anchor='n', relwidth=0.7, relheight=1.0)
+        
+        # Header
+        header = tk.Frame(center_container, bg='#f8fafc')
+        header.pack(fill=tk.X, padx=30, pady=(20, 10))
+        
+        tk.Label(header, text="⚙️ Data Management", font=('Segoe UI', 24, 'bold'),
+                bg='#f8fafc', fg='#1e293b').pack(anchor='w')
+        tk.Label(header, text="Delete specific entries or clear entire database",
+                font=('Segoe UI', 11), bg='#f8fafc', fg='#64748b').pack(anchor='w')
+        
+        # Database Statistics Card
+        stats = self.db.get_database_stats()
+        if stats:
+            stats_card = tk.Frame(center_container, bg='white', relief=tk.SOLID, borderwidth=1)
+            stats_card.pack(fill=tk.X, padx=30, pady=20)
+            
+            tk.Label(stats_card, text="📊 Current Database Statistics", 
+                    font=('Segoe UI', 13, 'bold'), bg='white', fg='#1e293b').pack(anchor='w', padx=20, pady=(15, 10))
+            
+            stat_text = f"""Total Projects: {stats['total_projects']}
+Total Cabinets: {stats['total_cabinets']}
+Total Category Occurrences: {stats['total_occurrences']}"""
+            
+            tk.Label(stats_card, text=stat_text, font=('Courier New', 11),
+                    bg='white', fg='#334155', justify='left').pack(anchor='w', padx=40, pady=(0, 15))
+        
+        # Delete Specific Entries Section
+        delete_section = tk.Frame(center_container, bg='white', relief=tk.SOLID, borderwidth=1)
+        delete_section.pack(fill=tk.X, padx=30, pady=10)
+        
+        tk.Label(delete_section, text="🗑️ Delete Specific Entries", 
+                font=('Segoe UI', 13, 'bold'), bg='white', fg='#1e293b').pack(anchor='w', padx=20, pady=(15, 10))
+        
+        btn_style = {'font': ('Segoe UI', 10, 'bold'), 'relief': tk.FLAT, 'cursor': 'hand2',
+                    'padx': 20, 'pady': 10, 'width': 30}
+        
+        tk.Button(delete_section, text="Delete Specific Cabinet", command=self.delete_cabinet_ui,
+                 bg='#f59e0b', fg='white', **btn_style).pack(padx=20, pady=(0, 10))
+        
+        tk.Button(delete_section, text="Delete Entire Project", command=self.delete_project_ui,
+                 bg='#ef4444', fg='white', **btn_style).pack(padx=20, pady=(0, 15))
+        
+        # Clear All Data Section
+        clear_section = tk.Frame(center_container, bg='#fef3c7', relief=tk.SOLID, borderwidth=2)
+        clear_section.pack(fill=tk.X, padx=30, pady=20)
+        
+        tk.Label(clear_section, text="⚠️ DANGER ZONE", 
+                font=('Segoe UI', 13, 'bold'), bg='#fef3c7', fg='#92400e').pack(anchor='w', padx=20, pady=(15, 5))
+        
+        tk.Label(clear_section, text="Clear all dashboard data (irreversible!)",
+                font=('Segoe UI', 10), bg='#fef3c7', fg='#78350f').pack(anchor='w', padx=20, pady=(0, 10))
+        
+        tk.Button(clear_section, text="🚨 CLEAR ALL DATA", command=self.clear_all_data_ui,
+                 bg='#dc2626', fg='white', **btn_style).pack(padx=20, pady=(0, 15))
+        
+        # Info text
+        info_text = """Note: 
+• Deleting a cabinet removes it from dashboard and analytics
+• Deleting a project removes all its cabinets
+• Clearing all data resets the entire database
+• These actions do NOT delete actual Excel or PDF files"""
+        
+        tk.Label(center_container, text=info_text, font=('Segoe UI', 9),
+                bg='#f8fafc', fg='#64748b', justify='left').pack(anchor='w', padx=30, pady=10)
+    
+    def delete_cabinet_ui(self):
+        """UI to delete a specific cabinet"""
+        # Get all projects
+        projects = self.db.get_all_projects()
+        if not projects:
+            messagebox.showinfo("No Data", "No projects found in database.")
+            return
+        
+        # Dialog to select project
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Delete Cabinet")
+        dlg.geometry("600x400")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        
+        tk.Label(dlg, text="Select Cabinet to Delete", font=('Segoe UI', 13, 'bold')).pack(pady=15)
+        
+        # Search box
+        search_frame = tk.Frame(dlg)
+        search_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        tk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=5)
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(search_frame, textvariable=search_var, font=('Segoe UI', 10))
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        # Listbox
+        list_frame = tk.Frame(dlg)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        listbox = tk.Listbox(list_frame, font=('Courier New', 10), yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        def populate_list(filter_text=""):
+            listbox.delete(0, tk.END)
+            for proj in projects:
+                cabinets = self.db.get_cabinets_by_project(proj['project_name'])
+                for cab in cabinets:
+                    display = f"{cab['cabinet_id']:20} | {cab['project_name']:30}"
+                    if filter_text.lower() in display.lower():
+                        listbox.insert(tk.END, display)
+        
+        populate_list()
+        search_var.trace('w', lambda *args: populate_list(search_var.get()))
+        
+        def do_delete():
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showwarning("No Selection", "Please select a cabinet.")
+                return
+            
+            cabinet_id = listbox.get(selection[0]).split('|')[0].strip()
+            
+            if not messagebox.askyesno("Confirm Delete",
+                                      f"Delete cabinet '{cabinet_id}'?\n\nThis will remove:\n• Cabinet from dashboard\n• All punch data\n• Analytics history\n\nCannot be undone!",
+                                      icon='warning'):
+                return
+            
+            if self.db.delete_cabinet(cabinet_id):
+                messagebox.showinfo("Deleted", f"Cabinet '{cabinet_id}' deleted successfully.")
+                dlg.destroy()
+                self.show_management()  # Refresh
+            else:
+                messagebox.showerror("Error", "Failed to delete cabinet.")
+        
+        # Buttons
+        tk.Button(dlg, text="Delete Selected", command=do_delete,
+                 bg='#ef4444', fg='white', font=('Segoe UI', 10, 'bold'),
+                 padx=20, pady=10).pack(side=tk.LEFT, padx=20, pady=15)
+        
+        tk.Button(dlg, text="Cancel", command=dlg.destroy,
+                 bg='#64748b', fg='white', font=('Segoe UI', 10, 'bold'),
+                 padx=20, pady=10).pack(side=tk.RIGHT, padx=20, pady=15)
+    
+    def delete_project_ui(self):
+        """UI to delete an entire project"""
+        projects = self.db.get_all_projects()
+        if not projects:
+            messagebox.showinfo("No Data", "No projects found in database.")
+            return
+        
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Delete Project")
+        dlg.geometry("600x400")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        
+        tk.Label(dlg, text="Select Project to Delete", font=('Segoe UI', 13, 'bold')).pack(pady=15)
+        tk.Label(dlg, text="⚠️ This will delete ALL cabinets in the project!", 
+                font=('Segoe UI', 10), fg='#dc2626').pack()
+        
+        # Listbox
+        list_frame = tk.Frame(dlg)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        listbox = tk.Listbox(list_frame, font=('Segoe UI', 11), yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        for proj in projects:
+            listbox.insert(tk.END, f"{proj['project_name']} ({proj['cabinet_count']} cabinet(s))")
+        
+        def do_delete():
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showwarning("No Selection", "Please select a project.")
+                return
+            
+            project_name = listbox.get(selection[0]).split('(')[0].strip()
+            
+            if not messagebox.askyesno("Confirm Delete",
+                                      f"Delete entire project '{project_name}'?\n\nThis will remove:\n• ALL cabinets in this project\n• All punch data\n• Analytics history\n\nCannot be undone!",
+                                      icon='warning'):
+                return
+            
+            if self.db.delete_project(project_name):
+                messagebox.showinfo("Deleted", f"Project '{project_name}' deleted successfully.")
+                dlg.destroy()
+                self.show_management()  # Refresh
+            else:
+                messagebox.showerror("Error", "Failed to delete project.")
+        
+        tk.Button(dlg, text="Delete Project", command=do_delete,
+                 bg='#dc2626', fg='white', font=('Segoe UI', 10, 'bold'),
+                 padx=20, pady=10).pack(side=tk.LEFT, padx=20, pady=15)
+        
+        tk.Button(dlg, text="Cancel", command=dlg.destroy,
+                 bg='#64748b', fg='white', font=('Segoe UI', 10, 'bold'),
+                 padx=20, pady=10).pack(side=tk.RIGHT, padx=20, pady=15)
+    
+    def clear_all_data_ui(self):
+        """UI to clear all data from database"""
+        stats = self.db.get_database_stats()
+        if not stats or stats['total_cabinets'] == 0:
+            messagebox.showinfo("No Data", "Database is already empty.")
+            return
+        
+        # Triple confirmation
+        confirm1 = messagebox.askyesno(
+            "⚠️ CLEAR ALL DATA - Confirmation 1/3",
+            f"You are about to DELETE ALL DATA from the dashboard!\n\n"
+            f"This will remove:\n"
+            f"• {stats['total_projects']} project(s)\n"
+            f"• {stats['total_cabinets']} cabinet(s)\n"
+            f"• {stats['total_occurrences']} punch record(s)\n\n"
+            f"Continue?",
+            icon='warning'
+        )
+        if not confirm1:
+            return
+        
+        confirm2 = messagebox.askyesno(
+            "⚠️ CLEAR ALL DATA - Confirmation 2/3",
+            "This action CANNOT be undone!\n\n"
+            "Are you absolutely sure?",
+            icon='warning'
+        )
+        if not confirm2:
+            return
+        
+        # Final confirmation with typed text
+        dlg = tk.Toplevel(self.root)
+        dlg.title("⚠️ Final Confirmation")
+        dlg.geometry("500x250")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        
+        tk.Label(dlg, text="⚠️ FINAL CONFIRMATION", font=('Segoe UI', 14, 'bold'),
+                fg='#dc2626').pack(pady=15)
+        
+        tk.Label(dlg, text='Type "DELETE ALL" to confirm:', 
+                font=('Segoe UI', 11)).pack(pady=10)
+        
+        entry_var = tk.StringVar()
+        entry = tk.Entry(dlg, textvariable=entry_var, font=('Segoe UI', 12), width=30)
+        entry.pack(pady=10)
+        entry.focus()
+        
+        result = {'confirmed': False}
+        
+        def check_and_delete():
+            if entry_var.get().strip() == "DELETE ALL":
+                result['confirmed'] = True
+                dlg.destroy()
+            else:
+                messagebox.showerror("Incorrect", 'You must type "DELETE ALL" exactly.')
+        
+        tk.Button(dlg, text="CONFIRM DELETE", command=check_and_delete,
+                 bg='#dc2626', fg='white', font=('Segoe UI', 10, 'bold'),
+                 padx=20, pady=10).pack(side=tk.LEFT, padx=20, pady=20)
+        
+        tk.Button(dlg, text="Cancel", command=dlg.destroy,
+                 bg='#64748b', fg='white', font=('Segoe UI', 10, 'bold'),
+                 padx=20, pady=10).pack(side=tk.RIGHT, padx=20, pady=20)
+        
+        entry.bind('<Return>', lambda e: check_and_delete())
+        
+        dlg.wait_window()
+        
+        if result['confirmed']:
+            if self.db.clear_all_data():
+                messagebox.showinfo("✓ Cleared", 
+                                  "All data has been cleared from the database.\n\n"
+                                  "Dashboard reset complete.")
+                self.show_management()  # Refresh
+            else:
+                messagebox.showerror("Error", "Failed to clear database.")
 
 
 def main():
