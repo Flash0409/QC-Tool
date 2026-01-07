@@ -31,7 +31,7 @@ def get_app_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 class ManagerDB:
-    """Simple manager database integration"""
+    """Manager database integration with storage_location and excel_path support"""
     def __init__(self, db_path):
         self.db_path = db_path
         self.init_database()
@@ -53,7 +53,9 @@ class ManagerDB:
             closed_punches INTEGER DEFAULT 0,
             status TEXT DEFAULT 'quality_inspection',
             created_date TEXT,
-            last_updated TEXT
+            last_updated TEXT,
+            storage_location TEXT,
+            excel_path TEXT
         )''')
         
         cursor.execute('''CREATE TABLE IF NOT EXISTS category_occurrences (
@@ -65,44 +67,83 @@ class ManagerDB:
             occurrence_date TEXT
         )''')
         
+        # Add columns if they don't exist (migration for existing databases)
+        try:
+            cursor.execute('ALTER TABLE cabinets ADD COLUMN storage_location TEXT')
+            print("✓ Added storage_location column to existing database")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
+        try:
+            cursor.execute('ALTER TABLE cabinets ADD COLUMN excel_path TEXT')
+            print("✓ Added excel_path column to existing database")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
         conn.commit()
         conn.close()
     
     def update_cabinet(self, cabinet_id, project_name, sales_order_no, 
                       total_pages, annotated_pages, total_punches, 
-                      open_punches, implemented_punches, closed_punches, status):
-        """Update cabinet statistics"""
+                      open_punches, implemented_punches, closed_punches, status,
+                      storage_location=None, excel_path=None):
+        """Update cabinet statistics WITH excel_path and storage_location
+        
+        Args:
+            cabinet_id: Cabinet identifier
+            project_name: Project name
+            sales_order_no: Sales order number
+            total_pages: Total pages in PDF
+            annotated_pages: Pages with annotations
+            total_punches: Total punch count
+            open_punches: Open punches count
+            implemented_punches: Implemented punches count
+            closed_punches: Closed punches count
+            status: Current status (quality_inspection, handed_to_production, in_progress, etc.)
+            storage_location: Path to project storage folder (optional)
+            excel_path: Path to working Excel file (optional)
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            from datetime import datetime
             cursor.execute('''
                 INSERT OR REPLACE INTO cabinets 
                 (cabinet_id, project_name, sales_order_no, total_pages, annotated_pages,
                  total_punches, open_punches, implemented_punches, closed_punches, status,
+                 storage_location, excel_path,
                  created_date, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         COALESCE((SELECT created_date FROM cabinets WHERE cabinet_id = ?), ?),
                         ?)
             ''', (cabinet_id, project_name, sales_order_no, total_pages, annotated_pages,
                   total_punches, open_punches, implemented_punches, closed_punches, status,
+                  storage_location, excel_path,
                   cabinet_id, datetime.now().isoformat(), datetime.now().isoformat()))
             
             conn.commit()
             conn.close()
+            print(f"✓ Manager DB: Updated {cabinet_id} - Status: {status}")
             return True
         except Exception as e:
             print(f"Manager DB update error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def log_category_occurrence(self, cabinet_id, project_name, category, subcategory):
-        """Log a category occurrence"""
+        """Log a category occurrence for analytics
+        
+        Args:
+            cabinet_id: Cabinet identifier
+            project_name: Project name
+            category: Main category name
+            subcategory: Subcategory name (can be None)
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            from datetime import datetime
             cursor.execute('''
                 INSERT INTO category_occurrences 
                 (cabinet_id, project_name, category, subcategory, occurrence_date)
@@ -117,12 +158,17 @@ class ManagerDB:
             return False
     
     def update_status(self, cabinet_id, status):
-        """Update cabinet status"""
+        """Update cabinet status only (without changing other fields)
+        
+        Args:
+            cabinet_id: Cabinet identifier
+            status: New status (quality_inspection, handed_to_production, in_progress, 
+                   being_closed_by_quality, closed)
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            from datetime import datetime
             cursor.execute('''
                 UPDATE cabinets 
                 SET status = ?, last_updated = ?
@@ -131,10 +177,59 @@ class ManagerDB:
             
             conn.commit()
             conn.close()
+            print(f"✓ Manager DB: Status updated for {cabinet_id} → {status}")
             return True
         except Exception as e:
             print(f"Status update error: {e}")
             return False
+    
+    def get_cabinet(self, cabinet_id):
+        """Get cabinet information from database
+        
+        Args:
+            cabinet_id: Cabinet identifier
+            
+        Returns:
+            Dictionary with cabinet info or None if not found
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT cabinet_id, project_name, sales_order_no, total_pages, annotated_pages,
+                       total_punches, open_punches, implemented_punches, closed_punches, status,
+                       storage_location, excel_path, created_date, last_updated
+                FROM cabinets 
+                WHERE cabinet_id = ?
+            ''', (cabinet_id,))
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                return {
+                    'cabinet_id': row[0],
+                    'project_name': row[1],
+                    'sales_order_no': row[2],
+                    'total_pages': row[3],
+                    'annotated_pages': row[4],
+                    'total_punches': row[5],
+                    'open_punches': row[6],
+                    'implemented_punches': row[7],
+                    'closed_punches': row[8],
+                    'status': row[9],
+                    'storage_location': row[10],
+                    'excel_path': row[11],
+                    'created_date': row[12],
+                    'last_updated': row[13]
+                }
+            return None
+            
+        except Exception as e:
+            print(f"Error getting cabinet: {e}")
+            return None
+
 
 
 class CircuitInspector:
@@ -215,6 +310,9 @@ class CircuitInspector:
         self.temp_rect_id = None
         self.temp_line_ids = []  # Store temporary pen line IDs
         self.selected_annotation = None
+        self.undo_stack = []  # Stack for undo operations
+        self.max_undo = 50    # Maximum undo history
+        self.hover_annotation = None  # For hover preview
 
         self.setup_ui()
         self.current_sr_no = self.get_next_sr_no()
@@ -226,7 +324,7 @@ class CircuitInspector:
         self.manager_db = ManagerDB(manager_db_path)
         self.handover_db = HandoverDB(os.path.join(base, "handover_db.json"))
         self.load_recent_projects_ui()
-
+        self.root.after(300000, self.auto_save_session)
     # ================================================================
     # COORDINATE CONVERSION HELPERS
     # ================================================================
@@ -278,9 +376,136 @@ class CircuitInspector:
         x1, y1, x2, y2 = bbox_display
         return (x1 / scale, y1 / scale, x2 / scale, y2 / scale)
 
-    # ================================================================
-    # TOOL MODE CONTROL
-    # ================================================================
+    # ============================================================================
+    # 7. ADD MOUSE MOTION FOR HOVER PREVIEW
+    # ============================================================================
+
+    def on_mouse_motion(self, event):
+        """Handle mouse motion for hover effects"""
+        if not self.pdf_document or self.drawing:
+            return
+        
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        
+        # Find annotation under cursor
+        hover_found = None
+        for ann in reversed(self.annotations):
+            if ann.get('page') != self.current_page:
+                continue
+            
+            # Check rectangles
+            if 'bbox_page' in ann:
+                x1d, y1d, x2d, y2d = self.bbox_page_to_display(ann['bbox_page'])
+                if x1d <= x <= x2d and y1d <= y <= y2d:
+                    hover_found = ann
+                    break
+            
+            # Check pen strokes
+            elif ann.get('type') == 'pen' and 'points' in ann:
+                points_display = self.page_to_display_coords(ann['points'])
+                if len(points_display) >= 2:
+                    xs = [p[0] for p in points_display]
+                    ys = [p[1] for p in points_display]
+                    if min(xs) - 10 <= x <= max(xs) + 10 and min(ys) - 10 <= y <= max(ys) + 10:
+                        hover_found = ann
+                        break
+            
+            # Check text
+            elif ann.get('type') == 'text' and 'pos_page' in ann:
+                pos_display = self.page_to_display_coords(ann['pos_page'])
+                if abs(x - pos_display[0]) < 50 and abs(y - pos_display[1]) < 20:
+                    hover_found = ann
+                    break
+        
+        # Update cursor
+        if hover_found:
+            self.canvas.config(cursor="hand2")
+            self.hover_annotation = hover_found
+        else:
+            if not self.tool_mode:
+                self.canvas.config(cursor="")
+            self.hover_annotation = None
+
+
+    # ============================================================================
+    # 8. ADD clear_all_annotations METHOD
+    # ============================================================================
+
+    def clear_all_annotations(self):
+        """Clear all annotations with confirmation"""
+        if not self.annotations:
+            messagebox.showinfo("No Annotations", "There are no annotations to clear.", icon='info')
+            return
+        
+        confirm = messagebox.askyesno(
+            "Clear All Annotations",
+            f"Are you sure you want to delete all {len(self.annotations)} annotations?\n\n"
+            "This action cannot be undone!",
+            icon='warning'
+        )
+        
+        if confirm:
+            self.annotations.clear()
+            self.selected_annotation = None
+            self.undo_stack.clear()
+            self.display_page()
+            self.update_tool_pane()
+            messagebox.showinfo("Cleared", "All annotations have been removed.", icon='info')
+
+
+    # ============================================================================
+    # 9. ADD update_tool_pane METHOD
+    # ============================================================================
+
+    def update_tool_pane(self):
+        """Update the tool pane with current annotation info"""
+        if not hasattr(self, 'annotation_count_label'):
+            return
+        
+        # Count annotations by type
+        total = len(self.annotations)
+        pen_count = len([a for a in self.annotations if a.get('type') == 'pen'])
+        text_count = len([a for a in self.annotations if a.get('type') == 'text'])
+        ok_count = len([a for a in self.annotations if a.get('type') == 'ok'])
+        error_count = len([a for a in self.annotations if a.get('type') == 'error'])
+        
+        count_text = f"{total} total\n"
+        if pen_count > 0:
+            count_text += f"✏️ {pen_count} pen  "
+        if text_count > 0:
+            count_text += f"🅰️ {text_count} text  "
+        if ok_count > 0:
+            count_text += f"✓ {ok_count} OK  "
+        if error_count > 0:
+            count_text += f"✗ {error_count} errors"
+        
+        self.annotation_count_label.config(text=count_text)
+        
+        # Update selection info
+        if self.selected_annotation:
+            ann_type = self.selected_annotation.get('type', 'unknown')
+            info_text = f"Type: {ann_type.capitalize()}\n"
+            
+            if ann_type == 'text':
+                text_content = self.selected_annotation.get('text', '')
+                info_text += f"Text: {text_content[:30]}..."
+            elif ann_type == 'pen':
+                points = self.selected_annotation.get('points', [])
+                info_text += f"Points: {len(points)}"
+            elif ann_type in ('ok', 'error'):
+                info_text += f"Page: {self.selected_annotation.get('page', 0) + 1}"
+                if self.selected_annotation.get('ref_no'):
+                    info_text += f"\nRef: {self.selected_annotation['ref_no']}"
+            
+            self.selection_info_label.config(text=info_text)
+        else:
+            self.selection_info_label.config(text="None\n(Ctrl+Click to select)")
+
+
+    # ============================================================================
+    # 10. MODIFY set_tool_mode TO UPDATE INDICATOR
+    # ============================================================================
 
     def set_tool_mode(self, mode):
         """Set the current tool mode with visual feedback"""
@@ -288,23 +513,29 @@ class CircuitInspector:
             # Toggle off
             self.tool_mode = None
             self.root.config(cursor="")
-            self.pen_btn.config(bg='#334155', relief=tk.FLAT)
-            self.text_btn.config(bg='#334155', relief=tk.FLAT)
+            self.pen_btn.config(bg='white', relief=tk.FLAT)
+            self.text_btn.config(bg='white', relief=tk.FLAT)
             self._flash_status("Normal mode - Left drag: OK | Right drag: Error", bg='#64748b')
+            if hasattr(self, 'tool_indicator'):
+                self.tool_indicator.config(text="🖱️ Normal", bg='#dbeafe', fg='#1e40af')
         else:
             # Reset all buttons
-            self.pen_btn.config(bg='#334155', relief=tk.FLAT)
-            self.text_btn.config(bg='#334155', relief=tk.FLAT)
+            self.pen_btn.config(bg='white', relief=tk.FLAT)
+            self.text_btn.config(bg='white', relief=tk.FLAT)
             
             self.tool_mode = mode
             if mode == "pen":
                 self.root.config(cursor="pencil")
-                self.pen_btn.config(bg='#3b82f6', relief=tk.SUNKEN)
+                self.pen_btn.config(bg='#dbeafe', relief=tk.SUNKEN)
                 self._flash_status("✏️ Pen Tool Active - Right-click to exit", bg='#3b82f6')
+                if hasattr(self, 'tool_indicator'):
+                    self.tool_indicator.config(text="✏️ Pen Tool", bg='#fef3c7', fg='#92400e')
             elif mode == "text":
                 self.root.config(cursor="xterm")
-                self.text_btn.config(bg='#3b82f6', relief=tk.SUNKEN)
+                self.text_btn.config(bg='#dbeafe', relief=tk.SUNKEN)
                 self._flash_status("🅰️ Text Tool Active - Right-click to exit", bg='#3b82f6')
+                if hasattr(self, 'tool_indicator'):
+                    self.tool_indicator.config(text="🅰️ Text Tool", bg='#fef3c7', fg='#92400e')
         
         self.pen_points.clear()
         self.clear_temp_drawings()
@@ -405,14 +636,16 @@ class CircuitInspector:
         # -------- PEN TOOL FINISH --------
         if self.drawing_type == "pen":
             if len(self.pen_points) >= 2:
-                # Convert to page coordinates and save
                 points_page = self.display_to_page_coords(self.pen_points)
-                self.annotations.append({
+                annotation = {
                     'type': 'pen',
                     'page': self.current_page,
                     'points': points_page,
                     'timestamp': datetime.now().isoformat()
-                })
+                }
+                self.annotations.append(annotation)
+                # ADD TO UNDO STACK
+                self.add_to_undo_stack('add_annotation', annotation)
             self.pen_points.clear()
             self.clear_temp_drawings()
             self.drawing = False
@@ -425,13 +658,16 @@ class CircuitInspector:
             txt = simpledialog.askstring("Text", "Enter text:", parent=self.root)
             if txt and txt.strip():
                 pos_page = self.display_to_page_coords((self.text_pos_x, self.text_pos_y))
-                self.annotations.append({
+                annotation = {
                     'type': 'text',
                     'page': self.current_page,
                     'pos_page': pos_page,
                     'text': txt.strip(),
                     'timestamp': datetime.now().isoformat()
-                })
+                }
+                self.annotations.append(annotation)
+                # ADD TO UNDO STACK
+                self.add_to_undo_stack('add_annotation', annotation)
                 self.display_page()
             self.drawing = False
             self.drawing_type = None
@@ -446,7 +682,6 @@ class CircuitInspector:
             x2 = max(self.rect_start_x, x)
             y2 = max(self.rect_start_y, y)
 
-            # Minimum size check
             if abs(x2 - x1) < 10 or abs(y2 - y1) < 10:
                 self.drawing = False
                 self.drawing_type = None
@@ -455,16 +690,20 @@ class CircuitInspector:
             bbox_display = (x1, y1, x2, y2)
             bbox_page = self.bbox_display_to_page(bbox_display)
 
-            self.annotations.append({
+            annotation = {
                 'type': 'ok',
                 'page': self.current_page,
                 'bbox_page': bbox_page,
                 'timestamp': datetime.now().isoformat()
-            })
+            }
+            self.annotations.append(annotation)
+            # ADD TO UNDO STACK
+            self.add_to_undo_stack('add_annotation', annotation)
             self.display_page()
 
         self.drawing = False
         self.drawing_type = None
+        self.update_tool_pane()
 
     # ================================================================
     # UPDATED: on_right_press - Right-click exits pen/text mode
@@ -685,6 +924,7 @@ class CircuitInspector:
             self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
             self.page_label.config(text=f"Page: {self.current_page + 1}/{len(self.pdf_document)}")
             self.sync_manager_stats_only()
+            self.update_tool_pane()
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to display page: {e}")
@@ -694,7 +934,7 @@ class CircuitInspector:
     # ================================================================
 
     def save_session(self):
-        """Save current session to JSON file"""
+        """Save current session to JSON file with all annotation types"""
         if not self.pdf_document:
             messagebox.showwarning("No PDF", "Load a PDF first before saving a session.")
             return
@@ -717,40 +957,70 @@ class CircuitInspector:
             'zoom_level': self.zoom_level,
             'current_sr_no': self.current_sr_no,
             'session_refs': list(self.session_refs),
-            'annotations': []
+            'annotations': [],
+            'undo_stack_size': len(self.undo_stack) if hasattr(self, 'undo_stack') else 0,
+            'save_timestamp': datetime.now().isoformat()
         }
 
+        # Process all annotation types
         for ann in self.annotations:
             entry = ann.copy()
 
-            # Serialize bbox_page (rectangles)
+            # ===== RECTANGLE ANNOTATIONS (ok/error) =====
             if 'bbox_page' in entry:
                 entry['bbox_page'] = [float(x) for x in entry['bbox_page']]
 
-            # Serialize points (pen strokes) - convert tuples to lists
+            # ===== PEN STROKES - Convert tuples to lists =====
             if 'points' in entry:
                 entry['points'] = [[float(x), float(y)] for x, y in entry['points']]
 
-            # Serialize pos_page (text position)
+            # ===== TEXT ANNOTATIONS - Convert tuple to list =====
             if 'pos_page' in entry:
                 pos = entry['pos_page']
                 entry['pos_page'] = [float(pos[0]), float(pos[1])]
+            
+            # Ensure text content is saved
+            if 'text' in entry:
+                entry['text'] = str(entry['text'])
 
             data['annotations'].append(entry)
+        
         self.sync_manager_stats_only()
 
         try:
             with open(save_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-            messagebox.showinfo("Saved", f"Session saved to:\n{save_path}")
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            # Count annotation types for feedback
+            pen_count = len([a for a in self.annotations if a.get('type') == 'pen'])
+            text_count = len([a for a in self.annotations if a.get('type') == 'text'])
+            ok_count = len([a for a in self.annotations if a.get('type') == 'ok'])
+            error_count = len([a for a in self.annotations if a.get('type') == 'error'])
+            
+            summary = f"Session saved successfully!\n\n"
+            summary += f"Total annotations: {len(self.annotations)}\n"
+            if pen_count > 0:
+                summary += f"✏️ Pen strokes: {pen_count}\n"
+            if text_count > 0:
+                summary += f"🅰️ Text annotations: {text_count}\n"
+            if ok_count > 0:
+                summary += f"✓ OK marks: {ok_count}\n"
+            if error_count > 0:
+                summary += f"✗ Error marks: {error_count}\n"
+            summary += f"\nSaved to:\n{save_path}"
+            
+            messagebox.showinfo("Saved", summary)
+            self._flash_status(f"✓ Saved {len(self.annotations)} annotations", bg='#10b981')
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save session: {e}")
+            messagebox.showerror("Error", f"Failed to save session:\n{e}")
+            import traceback
+            traceback.print_exc()
 
-    # ================================================================
-    # LOAD SESSION - WITH PROPER DESERIALIZATION
-    # ================================================================
 
+    # ============================================================================
+    # 13. ENHANCED load_session_from_path - WITH VALIDATION
+    # ============================================================================
     def load_session(self):
         """Load session from JSON file via file dialog"""
         path = filedialog.askopenfilename(
@@ -761,10 +1031,10 @@ class CircuitInspector:
             return
 
         self.load_session_from_path(path)
-        self.sync_manager_stats()
+        self.sync_manager_stats_only()
 
     def load_session_from_path(self, path):
-        """Load session from a specific JSON file path"""
+        """Load session from a specific JSON file path with all annotation types"""
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -785,21 +1055,36 @@ class CircuitInspector:
 
         # Restore annotations with proper type conversion
         self.annotations = []
+        pen_count = 0
+        text_count = 0
+        ok_count = 0
+        error_count = 0
+        
         for entry in data.get('annotations', []):
             ann = entry.copy()
 
-            # Deserialize bbox_page (convert list back to tuple)
+            # ===== RECTANGLE ANNOTATIONS - Convert list back to tuple =====
             if 'bbox_page' in ann:
                 ann['bbox_page'] = tuple(float(x) for x in ann['bbox_page'])
+                if ann.get('type') == 'ok':
+                    ok_count += 1
+                elif ann.get('type') == 'error':
+                    error_count += 1
 
-            # Deserialize points (pen strokes - convert lists to tuples)
+            # ===== PEN STROKES - Convert lists to tuples =====
             if 'points' in ann:
                 ann['points'] = [(float(p[0]), float(p[1])) for p in ann['points']]
+                pen_count += 1
 
-            # Deserialize pos_page (text position - convert list to tuple)
+            # ===== TEXT ANNOTATIONS - Convert list to tuple =====
             if 'pos_page' in ann:
                 pos = ann['pos_page']
                 ann['pos_page'] = (float(pos[0]), float(pos[1]))
+                text_count += 1
+            
+            # Ensure text content is restored
+            if 'text' in ann:
+                ann['text'] = str(ann['text'])
 
             self.annotations.append(ann)
 
@@ -808,7 +1093,85 @@ class CircuitInspector:
                 self.session_refs.add(str(ann['ref_no']).strip())
 
         self.display_page()
-        messagebox.showinfo("Loaded", f"Session loaded with {len(self.annotations)} annotations.\nMake sure the same PDF is open.")
+        
+        summary = f"Session loaded successfully!\n\n"
+        summary += f"Total annotations: {len(self.annotations)}\n"
+        if pen_count > 0:
+            summary += f"✏️ Pen strokes: {pen_count}\n"
+        if text_count > 0:
+            summary += f"🅰️ Text annotations: {text_count}\n"
+        if ok_count > 0:
+            summary += f"✓ OK marks: {ok_count}\n"
+        if error_count > 0:
+            summary += f"✗ Error marks: {error_count}\n"
+        summary += f"\nMake sure the same PDF is open."
+        
+        messagebox.showinfo("Loaded", summary)
+        self._flash_status(f"✓ Loaded {len(self.annotations)} annotations", bg='#3b82f6')
+
+
+    # ============================================================================
+    # 14. ADD SESSION VALIDATION METHOD
+    # ============================================================================
+
+    def validate_session_integrity(self):
+        """Validate that all annotations in session are properly formatted"""
+        issues = []
+        
+        for i, ann in enumerate(self.annotations):
+            ann_type = ann.get('type')
+            
+            # Check pen strokes
+            if ann_type == 'pen':
+                if 'points' not in ann:
+                    issues.append(f"Annotation {i}: Pen stroke missing points")
+                elif not isinstance(ann['points'], list):
+                    issues.append(f"Annotation {i}: Pen points not a list")
+                else:
+                    # Verify all points are tuples/lists of 2 numbers
+                    for j, pt in enumerate(ann['points']):
+                        if not (isinstance(pt, (list, tuple)) and len(pt) == 2):
+                            issues.append(f"Annotation {i}, Point {j}: Invalid format")
+            
+            # Check text annotations
+            elif ann_type == 'text':
+                if 'pos_page' not in ann:
+                    issues.append(f"Annotation {i}: Text missing position")
+                if 'text' not in ann or not ann['text']:
+                    issues.append(f"Annotation {i}: Text content missing")
+            
+            # Check rectangles
+            elif ann_type in ('ok', 'error'):
+                if 'bbox_page' not in ann:
+                    issues.append(f"Annotation {i}: Rectangle missing bbox")
+                elif not isinstance(ann['bbox_page'], (list, tuple)) or len(ann['bbox_page']) != 4:
+                    issues.append(f"Annotation {i}: Invalid bbox format")
+        
+        if issues:
+            print("⚠️ SESSION VALIDATION ISSUES:")
+            for issue in issues:
+                print(f"  - {issue}")
+            return False
+        else:
+            print("✓ Session validation passed")
+            return True
+
+
+    # ============================================================================
+    # 15. ADD AUTO-SAVE FEATURE (OPTIONAL BUT RECOMMENDED)
+    # ============================================================================
+
+    def auto_save_session(self):
+        """Auto-save session every 5 minutes"""
+        if self.pdf_document and hasattr(self, 'project_dirs'):
+            try:
+                self.save_session()
+                print(f"✓ Auto-saved at {datetime.now().strftime('%H:%M:%S')}")
+            except Exception as e:
+                print(f"⚠️ Auto-save failed: {e}")
+        
+        # Schedule next auto-save
+        self.root.after(300000, self.auto_save_session)  # 5 minutes
 
     # ================================================================
     # EXPORT ANNOTATED PDF - WITH PEN AND TEXT
@@ -1047,7 +1410,7 @@ class CircuitInspector:
         tools_menu.add_command(label="Review Checklist", command=self.review_checklist_now, accelerator="Ctrl+R")
         tools_menu.add_command(label="Punch Closing Mode", command=self.punch_closing_mode, accelerator="Ctrl+Shift+P")
         tools_menu.add_separator()
-        tools_menu.add_command(label="🔍 View Production Handbacks", command=self.view_production_handbacks, accelerator="Ctrl+Shift+V")
+        tools_menu.add_command(label="🔍 Verify Rework", command=self.view_production_handbacks, accelerator="Ctrl+Shift+V")
         
         # View Menu
         view_menu = Menu(menubar, tearoff=0, bg='#1e293b', fg='white', activebackground='#3b82f6')
@@ -1062,6 +1425,7 @@ class CircuitInspector:
         self.root.bind_all("<Control-l>", lambda e: self.load_session())
         self.root.bind_all("<Control-e>", lambda e: self.export_annotated_pdf())
         self.root.bind_all("<Control-r>", lambda e: self.review_checklist_now())
+        self.root.bind_all("<Control-z>", lambda e: self.undo_last_action())  # NEW
         self.root.bind_all("<Control-Shift-p>", lambda e: self.punch_closing_mode())
         self.root.bind_all("<Control-Shift-e>", lambda e: self.open_excel())
         self.root.bind_all("<Control-Shift-v>", lambda e: self.view_production_handbacks())
@@ -1131,39 +1495,49 @@ class CircuitInspector:
         tk.Label(tool_frame, text="Tools:", bg='#1e293b', fg='#94a3b8', 
                  font=('Segoe UI', 9)).pack(side=tk.LEFT, padx=(0, 8))
 
-        # UPDATED: Load icons with proper sizing to fill button
+        # Load icons
+        # Load icons
         try:
             assets_dir = os.path.join(os.path.dirname(get_app_base_dir()), "assets")
-            
-            # FIXED: Larger icon size to fill button (44x44 for 40x40 button with padding)
             icon_size = (44, 44)
             
-            # Pen icon
             pen_icon_path = os.path.join(assets_dir, "pen_icon.png")
             pen_img = Image.open(pen_icon_path).resize(icon_size, Image.Resampling.LANCZOS)
             self.pen_icon = ImageTk.PhotoImage(pen_img)
             
-            # Text icon
             text_icon_path = os.path.join(assets_dir, "text_icon.png")
             text_img = Image.open(text_icon_path).resize(icon_size, Image.Resampling.LANCZOS)
             self.text_icon = ImageTk.PhotoImage(text_img)
             
-            # FIXED: Buttons with compound='center' and no padding to fill completely
+            # ADD THIS: Load undo icon
+            undo_icon_path = os.path.join(assets_dir, "undo_icon.png")
+            undo_img = Image.open(undo_icon_path).resize(icon_size, Image.Resampling.LANCZOS)
+            self.undo_icon = ImageTk.PhotoImage(undo_img)
+            
             self.pen_btn = tk.Button(tool_frame, image=self.pen_icon, 
                                      command=lambda: self.set_tool_mode("pen"),
-                                     bg='#334155', width=48, height=48,
-                                     relief=tk.FLAT, cursor='hand2',
-                                     borderwidth=0, compound='center',
-                                     padx=0, pady=0)  # No padding
+                                     bg='#334155', width=48, height=48, 
+                                     relief=tk.FLAT, cursor='hand2', 
+                                     borderwidth=0, compound='center', 
+                                     padx=0, pady=0)
             self.pen_btn.pack(side=tk.LEFT, padx=2)
             
-            self.text_btn = tk.Button(tool_frame, image=self.text_icon,
+            self.text_btn = tk.Button(tool_frame, image=self.text_icon, 
                                       command=lambda: self.set_tool_mode("text"),
-                                      bg='#334155', width=48, height=48,
-                                      relief=tk.FLAT, cursor='hand2',
-                                      borderwidth=0, compound='center',
-                                      padx=0, pady=0)  # No padding
+                                      bg='#334155', width=48, height=48, 
+                                      relief=tk.FLAT, cursor='hand2', 
+                                      borderwidth=0, compound='center', 
+                                      padx=0, pady=0)
             self.text_btn.pack(side=tk.LEFT, padx=2)
+            
+            # FIXED: Now properly using self.undo_icon with correct command
+            self.undo_btn = tk.Button(tool_frame, image=self.undo_icon,
+                                      command=self.undo_last_action,  # ✓ Proper undo command
+                                      bg='#334155', width=48, height=48, 
+                                      relief=tk.FLAT, cursor='hand2', 
+                                      borderwidth=0, compound='center', 
+                                      padx=0, pady=0)
+            self.undo_btn.pack(side=tk.LEFT, padx=2)
             
         except Exception as e:
             print(f"Could not load tool icons: {e}")
@@ -1171,20 +1545,25 @@ class CircuitInspector:
             self.pen_btn = tk.Button(tool_frame, text="✏️ Pen", 
                                      command=lambda: self.set_tool_mode("pen"),
                                      bg='#334155', fg='white', width=8, height=1,
-                                     font=('Segoe UI', 9, 'bold'), relief=tk.FLAT, 
-                                     cursor='hand2', borderwidth=2)
+                                     font=('Segoe UI', 9, 'bold'), 
+                                     relief=tk.FLAT, cursor='hand2', borderwidth=2)
             self.pen_btn.pack(side=tk.LEFT, padx=2)
             
             self.text_btn = tk.Button(tool_frame, text="🅰️ Text", 
                                       command=lambda: self.set_tool_mode("text"),
                                       bg='#334155', fg='white', width=8, height=1,
-                                      font=('Segoe UI', 9, 'bold'), relief=tk.FLAT, 
-                                      cursor='hand2', borderwidth=2)
+                                      font=('Segoe UI', 9, 'bold'), 
+                                      relief=tk.FLAT, cursor='hand2', borderwidth=2)
             self.text_btn.pack(side=tk.LEFT, padx=2)
+            
+            # ADD FALLBACK FOR UNDO BUTTON
+            self.undo_btn = tk.Button(tool_frame, text="↶ Undo",
+                                      command=self.undo_last_action,
+                                      bg='#334155', fg='white', width=8, height=1,
+                                      font=('Segoe UI', 9, 'bold'),
+                                      relief=tk.FLAT, cursor='hand2', borderwidth=2)
+            self.undo_btn.pack(side=tk.LEFT, padx=2)
 
-        # Add tooltips
-        self.create_tooltip(self.pen_btn, "Pen Tool - Draw freehand annotations")
-        self.create_tooltip(self.text_btn, "Text Tool - Add text annotations")
         
         # Right section - Action buttons
         right_frame = tk.Frame(toolbar, bg='#1e293b')
@@ -1196,15 +1575,19 @@ class CircuitInspector:
         handover_btn_style = btn_style.copy()
         handover_btn_style['bg'] = '#8b5cf6'
         
+        # NEW: Verify Rework button
+        verify_btn_style = btn_style.copy()
+        verify_btn_style['bg'] = '#ec4899'
+        tk.Button(right_frame, text="🔍 Verify Rework", 
+                 command=self.view_production_handbacks, 
+                 **verify_btn_style).pack(side=tk.RIGHT, padx=3)
+        
         tk.Button(right_frame, text="🚀 Handover to Production", 
                  command=self.handover_to_production, 
                  **handover_btn_style).pack(side=tk.RIGHT, padx=3)
         
-        tk.Button(right_frame, text="📥 Export", 
-                 command=self.export_annotated_pdf, 
-                 **export_btn_style).pack(side=tk.RIGHT, padx=3)
         
-        # Canvas with scrollbars
+        # Canvas with scrollbars (ALL YOUR EXISTING CODE BELOW)
         canvas_frame = tk.Frame(self.root, bg='#f1f5f9')
         canvas_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         
@@ -1242,9 +1625,107 @@ class CircuitInspector:
         status_bar = tk.Frame(self.root, bg='#334155', height=40)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        instructions_text = "🖱️ Left Click: OK (Green) | Right Click: Error (Orange) | Ctrl+Click: Select | Delete: Remove"
+        instructions_text = "🖱️ Left Click: OK (Green) | Right Click: Error (Orange) | Ctrl+Click: Select | Delete: Remove | Ctrl+Z: Undo"
         tk.Label(status_bar, text=instructions_text, bg='#334155', fg='#e2e8f0', 
                  font=('Segoe UI', 9), pady=10).pack()
+
+
+    # ============================================================================
+    # 3. ADD HELPER METHODS FOR RIBBON UI
+    # ============================================================================
+
+    def create_tool_group(self, parent, title):
+        """Create a tool group in the ribbon"""
+        group_frame = tk.Frame(parent, bg='#e8eef5', relief=tk.RIDGE, borderwidth=1)
+        group_frame.pack(side=tk.LEFT, fill=tk.Y, padx=3, pady=3)
+        
+        # Group content
+        content = tk.Frame(group_frame, bg='#e8eef5')
+        content.pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 2))
+        
+        # Group title
+        tk.Label(group_frame, text=title, bg='#e8eef5', fg='#475569',
+                 font=('Segoe UI', 8)).pack(side=tk.BOTTOM, pady=(0, 3))
+        
+        return content
+
+    def create_tool_button(self, parent, text, command, width=12, pack_side=tk.TOP):
+        """Create a tool button in the ribbon"""
+        btn = tk.Button(parent, text=text, command=command,
+                       bg='white', fg='#1e293b',
+                       font=('Segoe UI', 9),
+                       relief=tk.FLAT, cursor='hand2',
+                       width=width, borderwidth=1,
+                       padx=5, pady=5)
+        btn.pack(side=pack_side, padx=2, pady=2)
+        
+        # Hover effects
+        def on_enter(e):
+            btn.config(bg='#dbeafe')
+        def on_leave(e):
+            btn.config(bg='white')
+        
+        btn.bind("<Enter>", on_enter)
+        btn.bind("<Leave>", on_leave)
+        
+        return btn
+
+    def toggle_tool_pane(self):
+        """Toggle the right tool pane visibility"""
+        if self.tool_pane_visible:
+            self.tool_pane_frame.pack_forget()
+            self.tool_pane_visible = False
+        else:
+            self.tool_pane_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(2, 0))
+            self.tool_pane_visible = True
+
+
+    # ============================================================================
+    # 4. ADD UNDO FUNCTIONALITY
+    # ============================================================================
+
+    def add_to_undo_stack(self, action_type, data):
+        """Add an action to the undo stack"""
+        self.undo_stack.append({
+            'type': action_type,
+            'data': data,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        # Limit stack size
+        if len(self.undo_stack) > self.max_undo:
+            self.undo_stack.pop(0)
+        
+        self.update_tool_pane()
+
+    def undo_last_action(self):
+        """Undo the last annotation action"""
+        if not self.undo_stack:
+            messagebox.showinfo("Nothing to Undo", "No actions to undo.", icon='info')
+            return
+        
+        last_action = self.undo_stack.pop()
+        action_type = last_action['type']
+        
+        if action_type == 'add_annotation':
+            # Remove the last added annotation
+            annotation = last_action['data']
+            if annotation in self.annotations:
+                self.annotations.remove(annotation)
+                self.display_page()
+                self._flash_status("✓ Annotation removed", bg='#10b981')
+            else:
+                messagebox.showwarning("Cannot Undo", "Annotation no longer exists.")
+        
+        elif action_type == 'delete_annotation':
+            # Restore deleted annotation
+            annotation = last_action['data']
+            self.annotations.append(annotation)
+            self.display_page()
+            self._flash_status("✓ Annotation restored", bg='#10b981')
+        
+        self.update_tool_pane()
+
 
 
     def create_tooltip(self, widget, text):
@@ -1306,7 +1787,7 @@ class CircuitInspector:
             
             # Update dropdown
             self.update_recent_dropdown()
-            self.sync_manager_stats()
+            self.sync_manager_stats_only()
             
         except Exception as e:
             print(f"Error saving recent project: {e}")
@@ -1830,17 +2311,24 @@ class CircuitInspector:
         self.display_page()
 
     def delete_selected_annotation(self, event=None):
+        """Delete selected annotation with undo support"""
         if not self.selected_annotation:
             messagebox.showinfo("No Selection", "Please select an annotation first by Ctrl+Clicking on it")
             return
+        
         if messagebox.askyesno("Delete Annotation", "Are you sure you want to delete this annotation?"):
+            # Save to undo stack BEFORE deleting
+            self.add_to_undo_stack('delete_annotation', self.selected_annotation.copy())
+            
             try:
                 self.annotations.remove(self.selected_annotation)
             except:
                 pass
+            
             self.selected_annotation = None
             self.display_page()
-            messagebox.showinfo("Deleted", "Annotation removed successfully")
+            self.update_tool_pane()
+            self._flash_status("✓ Annotation deleted (Ctrl+Z to undo)", bg='#f59e0b')
 
     # ================================================================
     # INTERPHASE UPDATE
@@ -3932,4 +4420,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

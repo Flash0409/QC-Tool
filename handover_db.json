@@ -1,42 +1,6 @@
 {
   "quality_to_production": [
     {
-      "cabinet_id": "1300",
-      "project_name": "Kshitij_Projects",
-      "sales_order_no": "2000710",
-      "pdf_path": "C:/Users/Kshitij Palshikar/Downloads/e1547548_12-16-2025_19-39-08.pdf",
-      "excel_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\Kshitij_Projects\\1300\\Working_Excel\\1300_Working.xlsx",
-      "session_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\Kshitij_Projects\\1300\\Sessions\\1300_annotations.json",
-      "total_punches": 1,
-      "open_punches": 1,
-      "closed_punches": 0,
-      "handed_over_by": "Kshitij Palshikar",
-      "handed_over_date": "2025-12-31T04:50:51.105088",
-      "status": "completed",
-      "received_by": "Kshitij Palshikar",
-      "received_date": "2025-12-31T04:52:01.869097",
-      "completed_by": null,
-      "completed_date": null
-    },
-    {
-      "cabinet_id": "1500",
-      "project_name": "Kshitij_Projects",
-      "sales_order_no": "2000710",
-      "pdf_path": "C:/Users/Kshitij Palshikar/Downloads/e1547548_12-16-2025_19-39-08.pdf",
-      "excel_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\Kshitij_Projects\\1500\\Working_Excel\\1500_Working.xlsx",
-      "session_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\Kshitij_Projects\\1500\\Sessions\\1500_annotations.json",
-      "total_punches": 1,
-      "open_punches": 1,
-      "closed_punches": 0,
-      "handed_over_by": "Kshitij Palshikar",
-      "handed_over_date": "2025-12-31T05:13:14.968099",
-      "status": "completed",
-      "received_by": "Kshitij Palshikar",
-      "received_date": "2025-12-31T05:13:32.802557",
-      "completed_by": null,
-      "completed_date": null
-    },
-    {
       "cabinet_id": "1243",
       "project_name": "KshitijP",
       "sales_order_no": "2000710",
@@ -44,59 +8,16 @@
       "excel_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\KshitijP\\1243\\Working_Excel\\1243_Working.xlsx",
       "session_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\KshitijP\\1243\\Sessions\\1243_annotations.json",
       "total_punches": 1,
-      "open_punches": 1,
-      "closed_punches": 0,
+      "open_punches": 0,
+      "closed_punches": 1,
       "handed_over_by": "Kshitij Palshikar",
-      "handed_over_date": "2025-12-31T07:10:11.276880",
-      "status": "completed",
-      "received_by": "Kshitij Palshikar",
-      "received_date": "2025-12-31T08:06:26.894717",
+      "handed_over_date": "2026-01-05T23:40:24.410007",
+      "status": "pending",
+      "received_by": null,
+      "received_date": null,
       "completed_by": null,
       "completed_date": null
     }
   ],
-  "production_to_quality": [
-    {
-      "cabinet_id": "1300",
-      "project_name": "Kshitij_Projects",
-      "sales_order_no": "2000710",
-      "pdf_path": "C:/Users/Kshitij Palshikar/Downloads/e1547548_12-16-2025_19-39-08.pdf",
-      "excel_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\Kshitij_Projects\\1300\\Working_Excel\\1300_Working.xlsx",
-      "session_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\Kshitij_Projects\\1300\\Sessions\\1300_annotations.json",
-      "rework_completed_by": "Kshitij Palshikar",
-      "rework_completed_date": "2025-12-31T04:52:29.197800",
-      "production_remarks": "No remarks",
-      "status": "closed",
-      "verified_by": "Kshitij Palshikar",
-      "verified_date": "2025-12-31T05:11:18.172596"
-    },
-    {
-      "cabinet_id": "1500",
-      "project_name": "Kshitij_Projects",
-      "sales_order_no": "2000710",
-      "pdf_path": "C:/Users/Kshitij Palshikar/Downloads/e1547548_12-16-2025_19-39-08.pdf",
-      "excel_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\Kshitij_Projects\\1500\\Working_Excel\\1500_Working.xlsx",
-      "session_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\Kshitij_Projects\\1500\\Sessions\\1500_annotations.json",
-      "rework_completed_by": "Kshitij Palshikar",
-      "rework_completed_date": "2025-12-31T05:14:18.708679",
-      "production_remarks": "No remarks",
-      "status": "closed",
-      "verified_by": "Kshitij Palshikar",
-      "verified_date": "2026-01-01T01:39:13.271094"
-    },
-    {
-      "cabinet_id": "1243",
-      "project_name": "KshitijP",
-      "sales_order_no": "2000710",
-      "pdf_path": "C:/Users/Kshitij Palshikar/Downloads/e1547548_12-16-2025_19-39-08.pdf",
-      "excel_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\KshitijP\\1243\\Working_Excel\\1243_Working.xlsx",
-      "session_path": "C:/Users/Kshitij Palshikar/OneDrive/Desktop\\KshitijP\\1243\\Sessions\\1243_annotations.json",
-      "rework_completed_by": "Kshitij Palshikar",
-      "rework_completed_date": "2025-12-31T08:08:11.638947",
-      "production_remarks": "No remarks",
-      "status": "closed",
-      "verified_by": "Kshitij Palshikar",
-      "verified_date": "2026-01-01T15:33:17.275606"
-    }
-  ]
+  "production_to_quality": []
 }
