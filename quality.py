@@ -322,7 +322,7 @@ class CircuitInspector:
         self.db = DatabaseManager(db_path)
         manager_db_path = os.path.join(base, "manager.db")
         self.manager_db = ManagerDB(manager_db_path)
-        self.handover_db = HandoverDB(os.path.join(base, "handover_db.json"))
+        self.handover_db = HandoverDB(os.path.join(base, "inspection_tool.db"))
         self.load_recent_projects_ui()
         self.root.after(300000, self.auto_save_session)
     # ================================================================
@@ -4420,3 +4420,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
