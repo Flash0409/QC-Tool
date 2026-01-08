@@ -177,7 +177,8 @@ class ProductionTool:
             'implemented_name': 'G',
             'implemented_date': 'H',
             'closed_name': 'I',
-            'closed_date': 'J'
+            'closed_date': 'J',
+            'remarks': 'K'
         }
         
         self.interphase_sheet_name = 'Interphase'
@@ -1019,17 +1020,34 @@ class ProductionTool:
             if not name:
                 return
             
-            remark = simpledialog.askstring("Remarks (optional)",
-                                          "Add remarks about the implementation (optional):",
+            # UPDATED: Ask for remarks
+            remark = simpledialog.askstring("Implementation Remarks (Optional)",
+                                          "Add remarks about the implementation:\n\n"
+                                          "(This will be visible to Quality team)",
                                           parent=dlg)
             
             try:
                 wb = load_workbook(self.excel_file)
                 ws = wb[self.punch_sheet_name]
                 
+                # Write implementation info
                 self.write_cell(ws, p['row'], self.punch_cols['implemented_name'], name)
                 self.write_cell(ws, p['row'], self.punch_cols['implemented_date'],
                               datetime.now().strftime("%Y-%m-%d"))
+                
+                # NEW: Write remarks to Excel (append with timestamp if remarks exist)
+                if remark and remark.strip():
+                    existing_remark = self.read_cell(ws, p['row'], self.punch_cols['remarks'])
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    
+                    if existing_remark:
+                        # Append to existing remarks
+                        new_remark = f"{existing_remark}\n\n[Production - {timestamp}]\n{remark.strip()}"
+                    else:
+                        # Create new remark
+                        new_remark = f"[Production - {timestamp}]\n{remark.strip()}"
+                    
+                    self.write_cell(ws, p['row'], self.punch_cols['remarks'], new_remark)
                 
                 wb.save(self.excel_file)
                 wb.close()
@@ -1046,13 +1064,14 @@ class ProductionTool:
                 messagebox.showerror("Excel Error", str(e), parent=dlg)
                 return
             
-            # Update annotation
+            # Update annotation with remark
             ann = next((a for a in self.annotations if a.get('sr_no') == p['sr_no']), None)
             if ann:
                 ann['implemented'] = True
                 ann['implemented_name'] = name
                 ann['implemented_date'] = datetime.now().isoformat()
-                ann['implementation_remark'] = remark
+                if remark:
+                    ann['implementation_remark'] = remark
             
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
@@ -1551,4 +1570,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
