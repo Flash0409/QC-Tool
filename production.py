@@ -151,7 +151,7 @@ class ProductionTool:
         base = get_app_base_dir()
         
         # Initialize databases
-        self.handover_db = HandoverDB(os.path.join(base, "handover_db.json"))
+        self.handover_db = HandoverDB(os.path.join(base, "inspection_tool.db")))
         self.db = DatabaseManager(os.path.join(base, "inspection_tool.db"))
         self.manager_db = ManagerDB(os.path.join(base, "manager.db"))
         
@@ -1551,3 +1551,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
