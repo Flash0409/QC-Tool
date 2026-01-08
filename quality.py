@@ -262,17 +262,18 @@ class CircuitInspector:
 
         # Fixed column mapping
         self.punch_sheet_name = 'Punch Sheet'
+        # In both quality.py and production.py - update the punch_cols dictionary
+
         self.punch_cols = {
             'sr_no': 'A',
-            'ref_no': 'B',
+            'ref_no':  'B',
             'desc': 'C',
             'category': 'D',
-            'checked_name': 'E',
-            'checked_date': 'F',
             'implemented_name': 'G',
-            'implemented_date': 'H',
+            'implemented_date':  'H',
             'closed_name': 'I',
-            'closed_date': 'J'
+            'closed_date':  'J',
+            'remarks': 'K'  # NEW:  Add remarks column
         }
         
         self.interphase_sheet_name = 'Interphase'
@@ -2645,55 +2646,55 @@ class CircuitInspector:
     # ================================================================
 
     def punch_closing_mode(self):
-        """Modern dialog for punch closing workflow"""
+        """Modern dialog for punch closing workflow with remarks support"""
         punches = self.read_open_punches_from_excel()
-
+    
         if not punches:
             messagebox.showinfo("No Open Punches", 
                               "✓ All punches are closed!\nNo items require attention.",
                               icon='info')
             return
-
+    
         punches.sort(key=lambda p: (not p['implemented'], p['sr_no']))
-
+    
         # Modern dialog window
         dlg = tk.Toplevel(self.root)
         dlg.title("Punch Closing Mode")
-        dlg.geometry("950x600")  # Slightly taller
+        dlg.geometry("950x700")  # Increased height for remarks
         dlg.configure(bg='#f8fafc')
         dlg.transient(self.root)
         dlg.grab_set()
         
-        # Header - REDUCED HEIGHT
-        header_frame = tk.Frame(dlg, bg='#1e293b', height=50)  # Reduced from 60
+        # Header
+        header_frame = tk.Frame(dlg, bg='#1e293b', height=50)
         header_frame.pack(fill=tk.X)
         header_frame.pack_propagate(False)
         
         tk.Label(header_frame, text="✓ Punch Closing Mode", 
                 bg='#1e293b', fg='white', 
-                font=('Segoe UI', 13, 'bold')).pack(pady=12)  # Reduced padding
+                font=('Segoe UI', 13, 'bold')).pack(pady=12)
         
-        # Progress - REDUCED PADDING
+        # Progress
         progress_frame = tk.Frame(dlg, bg='#f8fafc')
-        progress_frame.pack(fill=tk.X, padx=20, pady=(10, 5))  # Reduced top padding
+        progress_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
         
         idx_label = tk.Label(progress_frame, text="", font=('Segoe UI', 10, 'bold'),
                             bg='#f8fafc', fg='#1e293b')
         idx_label.pack()
         
-        # ORIGINAL Info cards - KEPT AS BEFORE
+        # Info cards
         info_frame = tk.Frame(dlg, bg='#f8fafc')
-        info_frame.pack(fill=tk.X, padx=20, pady=8)  # Slightly reduced padding
+        info_frame.pack(fill=tk.X, padx=20, pady=8)
         
         # SR Number card
         sr_card = tk.Frame(info_frame, bg='#dbeafe', relief=tk.FLAT)
         sr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
         tk.Label(sr_card, text="SR No.", font=('Segoe UI', 8), 
-                bg='#dbeafe', fg='#1e40af').pack(anchor='w', padx=10, pady=(6, 2))  # Reduced padding
+                bg='#dbeafe', fg='#1e40af').pack(anchor='w', padx=10, pady=(6, 2))
         sr_label = tk.Label(sr_card, text="", font=('Segoe UI', 12, 'bold'),
                            bg='#dbeafe', fg='#1e293b')
-        sr_label.pack(anchor='w', padx=10, pady=(0, 6))  # Reduced padding
+        sr_label.pack(anchor='w', padx=10, pady=(0, 6))
         
         # Reference card
         ref_card = tk.Frame(info_frame, bg='#e0e7ff', relief=tk.FLAT)
@@ -2715,22 +2716,32 @@ class CircuitInspector:
                              bg='#fef3c7', fg='#1e293b')
         impl_label.pack(anchor='w', padx=10, pady=(0, 6))
         
-        # Content - REDUCED HEIGHT
+        # Content - SPLIT INTO TWO SECTIONS
         content_frame = tk.Frame(dlg, bg='white', relief=tk.FLAT)
-        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=8)  # Reduced padding
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=8)
         
+        # Description section
         tk.Label(content_frame, text="Punch Description:", font=('Segoe UI', 9, 'bold'),
                 bg='white', fg='#64748b', anchor='w').pack(fill=tk.X, padx=15, pady=(8, 3))
         
-        # REDUCED text widget height
-        text_widget = tk.Text(content_frame, wrap=tk.WORD, height=9,  # Reduced from 14 to 9
+        text_widget = tk.Text(content_frame, wrap=tk.WORD, height=6,  # Reduced height
                              font=('Segoe UI', 10), bg='#f8fafc',
                              relief=tk.FLAT, padx=10, pady=8)
-        text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 5))
         text_widget.config(state=tk.DISABLED)
-
+        
+        # NEW: Remarks section
+        tk.Label(content_frame, text="Remarks History:", font=('Segoe UI', 9, 'bold'),
+                bg='white', fg='#64748b', anchor='w').pack(fill=tk.X, padx=15, pady=(5, 3))
+        
+        remarks_widget = tk.Text(content_frame, wrap=tk.WORD, height=5,
+                                font=('Segoe UI', 9), bg='#fef3c7',
+                                relief=tk.FLAT, padx=10, pady=8)
+        remarks_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
+        remarks_widget.config(state=tk.DISABLED)
+    
         pos = [0]
-
+    
         def show_item():
             p = punches[pos[0]]
             
@@ -2753,57 +2764,55 @@ class CircuitInspector:
             text_widget.insert(tk.END, p['punch_text'])
             text_widget.insert(tk.END, f"\n\n──────────────────\n")
             text_widget.insert(tk.END, f"Category: {p['category']}\n")
-
-            # Find annotation for implementation remarks
-            ann = next((a for a in self.annotations if a.get('sr_no') == p['sr_no']), None)
-            if ann and ann.get('implementation_remark'):
-                text_widget.insert(tk.END, f"\n──────────────────\n")
-                text_widget.insert(tk.END, "Implementation Remarks:\n")
-                text_widget.insert(tk.END, ann['implementation_remark'])
-            
-            # NEW: Check for production remarks from handover database
-            try:
-                # Try to find production remarks for this cabinet
-                handover_data = self.handover_db.get_handover_by_cabinet(self.cabinet_id)
-                if handover_data and handover_data.get('production_remarks'):
-                    text_widget.insert(tk.END, f"\n\n──────────────────\n")
-                    text_widget.insert(tk.END, "🔧 Production Remarks:\n")
-                    text_widget.insert(tk.END, handover_data['production_remarks'])
-                    text_widget.insert(tk.END, f"\n\nRework by: {handover_data.get('rework_completed_by', 'N/A')}")
-                    text_widget.insert(tk.END, f"\nDate: {handover_data.get('rework_completed_date', 'N/A')[:10]}")
-            except Exception as e:
-                print(f"Could not load production remarks: {e}")
-
             text_widget.config(state=tk.DISABLED)
-
+            
+            # NEW: Load and display remarks from Excel
+            remarks_widget.config(state=tk.NORMAL)
+            remarks_widget.delete("1.0", tk.END)
+            
+            try:
+                wb = load_workbook(self.excel_file, data_only=True)
+                ws = wb[self.punch_sheet_name]
+                existing_remarks = self.read_cell(ws, p['row'], self.punch_cols['remarks'])
+                wb.close()
+                
+                if existing_remarks and str(existing_remarks).strip():
+                    remarks_widget.insert(tk.END, str(existing_remarks))
+                else:
+                    remarks_widget.insert(tk.END, "No remarks recorded.")
+            except Exception as e:
+                remarks_widget.insert(tk.END, f"Could not load remarks: {e}")
+            
+            remarks_widget.config(state=tk.DISABLED)
+    
         show_item()
-
+    
         def close_punch():
             p = punches[pos[0]]
-
+    
             try:
                 default_user = os.getlogin()
             except:
                 default_user = getpass.getuser()
-
+    
             name = simpledialog.askstring("Closed By", 
                                          "Enter your name to close this punch:", 
                                          initialvalue=default_user, 
                                          parent=dlg)
             if not name:
                 return
-
+    
             try:
                 wb = load_workbook(self.excel_file)
                 ws = wb[self.punch_sheet_name]
-
+    
                 self.write_cell(ws, p['row'], self.punch_cols['closed_name'], name)
                 self.write_cell(ws, p['row'], self.punch_cols['closed_date'], 
                               datetime.now().strftime("%Y-%m-%d"))
-
+    
                 wb.save(self.excel_file)
                 wb.close()
-
+    
             except PermissionError:
                 messagebox.showerror("File Locked", 
                                    "⚠️ Please close the Excel file and try again.")
@@ -2811,15 +2820,15 @@ class CircuitInspector:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to close punch:\n{e}")
                 return
-
+    
             ann = next((a for a in self.annotations if a.get('excel_row') == p['row']), None)
             if ann:
                 ann['type'] = 'ok'
                 ann['closed_by'] = name
                 ann['closed_date'] = datetime.now().strftime("%Y-%m-%d")
-
+    
             self.display_page()
-
+    
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
                 show_item()
@@ -2828,54 +2837,108 @@ class CircuitInspector:
                                   f"✓ All punches closed!\n{len(punches)} items processed.",
                                   icon='info')
                 dlg.destroy()
-
+        
+        # NEW: Add remarks function
+        def add_quality_remark():
+            p = punches[pos[0]]
+            
+            remark = simpledialog.askstring("Quality Remark",
+                                           "Add remark about this punch:\n\n"
+                                           "(e.g., 'Implementation not satisfactory - rework needed')",
+                                           parent=dlg)
+            
+            if not remark or not remark.strip():
+                return
+            
+            try:
+                wb = load_workbook(self.excel_file)
+                ws = wb[self.punch_sheet_name]
+                
+                # Read existing remarks
+                existing_remark = self.read_cell(ws, p['row'], self.punch_cols['remarks'])
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                
+                try:
+                    username = os.getlogin()
+                except:
+                    username = getpass.getuser()
+                
+                if existing_remark:
+                    # Append to existing remarks
+                    new_remark = f"{existing_remark}\n\n[Quality - {timestamp} - {username}]\n{remark.strip()}"
+                else:
+                    # Create new remark
+                    new_remark = f"[Quality - {timestamp} - {username}]\n{remark.strip()}"
+                
+                self.write_cell(ws, p['row'], self.punch_cols['remarks'], new_remark)
+                
+                wb.save(self.excel_file)
+                wb.close()
+                
+                messagebox.showinfo("Remark Added", "✓ Remark saved to Excel", parent=dlg)
+                
+                # Refresh display
+                show_item()
+            
+            except PermissionError:
+                messagebox.showerror("File Locked",
+                                   "⚠️ Please close the Excel file and try again.",
+                                   parent=dlg)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to add remark:\n{e}", parent=dlg)
+    
         def next_item():
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
                 show_item()
-
+    
         def prev_item():
             if pos[0] > 0:
                 pos[0] -= 1
                 show_item()
-
-        # EXPANDED: Button frame with MORE SPACE
-        btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)  # Fixed height
-        btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))  # More bottom padding
-        btn_frame.pack_propagate(False)  # Prevent shrinking
+    
+        # UPDATED: Button frame with Add Remark button
+        btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)
+        btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))
+        btn_frame.pack_propagate(False)
         
-        # Button container centered vertically
         btn_container = tk.Frame(btn_frame, bg='#f8fafc')
         btn_container.pack(expand=True)
         
-        # LARGER button style
         btn_style = {
-            'font': ('Segoe UI', 12, 'bold'),  # Bigger font
+            'font': ('Segoe UI', 11, 'bold'),
             'relief': tk.FLAT,
             'borderwidth': 0,
             'cursor': 'hand2',
-            'padx': 35,   # More horizontal padding
-            'pady': 18,   # More vertical padding
-            'width': 15   # Fixed width in characters
+            'padx': 25,
+            'pady': 15,
+            'width': 13
         }
-
-        # Create buttons with consistent sizing
+    
         tk.Button(btn_container, text="◀  Previous", command=prev_item, 
-                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=5)
         
-        # Main action button - slightly larger
+        # NEW: Add Remark button
+        remark_btn_style = btn_style.copy()
+        remark_btn_style['width'] = 15
+        tk.Button(btn_container, text="💬 Add Remark", command=add_quality_remark,
+                 bg='#f59e0b', fg='white', **remark_btn_style).pack(side=tk.LEFT, padx=5)
+        
         close_btn_style = btn_style.copy()
-        close_btn_style['width'] = 18
+        close_btn_style['width'] = 16
         tk.Button(btn_container, text="✓  CLOSE PUNCH", command=close_punch, 
-                 bg='#10b981', fg='white', **close_btn_style).pack(side=tk.LEFT, padx=8)
+                 bg='#10b981', fg='white', **close_btn_style).pack(side=tk.LEFT, padx=5)
         
         tk.Button(btn_container, text="Next  ▶", command=next_item, 
-                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=5)
         
         tk.Button(btn_container, text="Cancel", command=dlg.destroy, 
-                 bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-
+                 bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=5)
+    
         dlg.wait_window()
+
+
+
     def read_open_punches_from_excel(self):
         """Reads punch sheet and returns list of open punches."""
         punches = []
@@ -4420,4 +4483,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
