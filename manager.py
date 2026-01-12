@@ -1,8 +1,3 @@
-"""
-Manager UI - Complete Dashboard, Analytics, and Defect Library System
-UPDATED: Template Excel editor, renamed Defect Library, removed data management
-Run this as: python manager_ui.py
-"""
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from PIL import Image, ImageTk
@@ -175,6 +170,74 @@ class ManagerDatabase:
             print(f"Error counting punches from Excel: {e}")
             return (0, 0, 0)
     
+    def get_status_from_interphase(self, excel_path):
+        """Read Interphase worksheet and determine status based on reference number
+        Returns: status string or None if not determined from Interphase
+        """
+        if not excel_path or not os.path.exists(excel_path):
+            return None
+        
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(excel_path, data_only=True)
+            
+            # Check if Interphase worksheet exists
+            if 'Interphase' not in wb.sheetnames:
+                wb.close()
+                return None
+            
+            ws = wb['Interphase']
+            
+            # Find the lowest filled status cell in column D
+            lowest_status_row = None
+            lowest_ref_no = None
+            
+            # Start from row 2 (assuming row 1 is header)
+            for row in range(2, ws.max_row + 1):
+                status_cell = self.read_cell(ws, row, 'D')
+                
+                # If status cell has content, check the reference number
+                if status_cell:
+                    ref_no_cell = self.read_cell(ws, row, 'B')
+                    
+                    if ref_no_cell:
+                        lowest_status_row = row
+                        lowest_ref_no = str(ref_no_cell).strip()
+            
+            wb.close()
+            
+            # If we found a reference number, determine the status
+            if lowest_ref_no:
+                try:
+                    # Handle range formats like "1-2" or single numbers like "5"
+                    if '-' in lowest_ref_no:
+                        # Get the first number in the range
+                        ref_num = int(lowest_ref_no.split('-')[0])
+                    else:
+                        ref_num = int(lowest_ref_no)
+                    
+                    # Determine status based on reference number
+                    if 1 <= ref_num <= 2:
+                        return 'project_info_sheet'
+                    elif 3 <= ref_num <= 9:
+                        return 'mechanical_assembly'
+                    elif 10 <= ref_num <= 18:
+                        return 'component_assembly'
+                    elif 19 <= ref_num <= 26:
+                        return 'final_assembly'
+                    elif 27 <= ref_num <= 31:
+                        return 'final_documentation'
+                
+                except (ValueError, IndexError):
+                    # If we can't parse the reference number, return None
+                    pass
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error reading Interphase worksheet: {e}")
+            return None
+    
     def get_all_projects(self):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -189,7 +252,7 @@ class ManagerDatabase:
         return projects
     
     def get_cabinets_by_project(self, project_name):
-        """Get cabinets with real-time Excel-based punch counts"""
+        """Get cabinets with real-time Excel-based punch counts and status from Interphase"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''SELECT cabinet_id, project_name, total_pages, annotated_pages,
@@ -200,10 +263,22 @@ class ManagerDatabase:
         
         cabinets = []
         for row in cursor.fetchall():
-            cabinet_id, project_name, total_pages, annotated_pages, status, excel_path, storage_location = row
+            cabinet_id, project_name, total_pages, annotated_pages, db_status, excel_path, storage_location = row
             
             # Get real counts from Excel
             total_punches, implemented_punches, closed_punches = self.count_punches_from_excel(excel_path)
+            
+            # Try to get status from Interphase worksheet first
+            interphase_status = self.get_status_from_interphase(excel_path)
+            
+            # Use Interphase status if available, otherwise use database status
+            # Only override if the database doesn't have a status set by production/quality code
+            if interphase_status and db_status in ['quality_inspection', 'project_info_sheet', 
+                                                     'mechanical_assembly', 'component_assembly', 
+                                                     'final_assembly', 'final_documentation']:
+                final_status = interphase_status
+            else:
+                final_status = db_status
             
             cabinets.append({
                 'cabinet_id': cabinet_id,
@@ -213,7 +288,7 @@ class ManagerDatabase:
                 'total_punches': total_punches,
                 'implemented_punches': implemented_punches,
                 'closed_punches': closed_punches,
-                'status': status,
+                'status': final_status,
                 'excel_path': excel_path,
                 'storage_location': storage_location
             })
@@ -589,13 +664,13 @@ class ManagerUI:
             tk.Label(parent, text="No cabinets", bg='white').pack(pady=20)
             return
         
-        # Header
+        # Header - REMOVED Drawing % and Debug columns
         hdr = tk.Frame(parent, bg='#f1f5f9')
         hdr.pack(fill=tk.X, pady=5)
         
         headers = [
-            ("Cabinet", 18), ("Drawing %", 10), ("Total Punches", 12),
-            ("Implemented", 12), ("Closed", 8), ("Status", 25), ("Debug", 8)
+            ("Cabinet", 20), ("Total Punches", 12),
+            ("Implemented", 12), ("Closed", 10), ("Status", 30)
         ]
         
         for text, w in headers:
@@ -609,7 +684,7 @@ class ManagerUI:
             
             # Cabinet ID - CLICKABLE
             cabinet_label = tk.Label(row, text=cab['cabinet_id'], font=('Segoe UI', 9, 'bold'),
-                    bg='white', fg='#3b82f6', width=18, anchor='w', cursor='hand2')
+                    bg='white', fg='#3b82f6', width=20, anchor='w', cursor='hand2')
             cabinet_label.pack(side=tk.LEFT, padx=3)
             
             # Make it clickable to open Excel
@@ -628,11 +703,7 @@ class ManagerUI:
             cabinet_label.bind('<Enter>', on_enter)
             cabinet_label.bind('<Leave>', on_leave)
             
-            # Drawing completion percentage
-            pct = (cab['annotated_pages']/cab['total_pages']*100) if cab['total_pages'] else 0
-            tk.Label(row, text=f"{pct:.0f}%", font=('Segoe UI', 9, 'bold'),
-                    bg='white', fg='#10b981' if pct==100 else '#f59e0b',
-                    width=10).pack(side=tk.LEFT, padx=3)
+            # REMOVED Drawing percentage section
             
             # Total Punches
             tk.Label(row, text=str(cab['total_punches']), font=('Segoe UI', 9),
@@ -644,11 +715,15 @@ class ManagerUI:
             
             # Closed
             tk.Label(row, text=str(cab['closed_punches']), font=('Segoe UI', 9),
-                    bg='white', width=8, anchor='center').pack(side=tk.LEFT, padx=3)
+                    bg='white', width=10, anchor='center').pack(side=tk.LEFT, padx=3)
             
-            # Status
+            # Status - UPDATED status map
             status_map = {
-                'quality_inspection': ('🔍 Quality Inspection', '#3b82f6'),
+                'project_info_sheet': ('📋 Project Info Sheet', '#3b82f6'),
+                'mechanical_assembly': ('⚙️ Mechanical Assembly', '#8b5cf6'),
+                'component_assembly': ('🔧 Component Assembly', '#f59e0b'),
+                'final_assembly': ('🏗️ Final Assembly', '#10b981'),
+                'final_documentation': ('📄 Final Documentation', '#64748b'),
                 'handed_to_production': ('📦 Handed to Production', '#8b5cf6'),
                 'in_progress': ('🔧 Production Rework', '#f59e0b'),
                 'being_closed_by_quality': ('✅ Being Closed', '#10b981'),
@@ -662,15 +737,10 @@ class ManagerUI:
             
             status_label = tk.Label(row, text=status_text, font=('Segoe UI', 9, 'bold'),
                                    bg=status_color, fg='white', padx=10, pady=4,
-                                   anchor='w', width=25)
+                                   anchor='w', width=30)
             status_label.pack(side=tk.LEFT, padx=3)
             
-            # Debug button
-            debug_btn = tk.Button(row, text="🔍", 
-                                 command=lambda c=cab: self.show_cabinet_debug(c),
-                                 bg='#f59e0b', fg='white', font=('Segoe UI', 8, 'bold'),
-                                 width=5, relief=tk.FLAT, cursor='hand2')
-            debug_btn.pack(side=tk.LEFT, padx=3)
+            # REMOVED Debug button
     
     def open_excel_file(self, excel_path):
         """Open Excel file in default application"""
@@ -691,93 +761,6 @@ class ManagerUI:
                               f"Opening:\n{os.path.basename(excel_path)}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to open Excel file:\n{e}")
-    
-    def show_cabinet_debug(self, cabinet):
-        """Show debug information for a cabinet - reads directly from Excel"""
-        conn = sqlite3.connect(self.db.db_path)
-        cursor = conn.cursor()
-        
-        # Get actual counts from category_occurrences
-        cursor.execute('''SELECT COUNT(*) FROM category_occurrences 
-                         WHERE cabinet_id = ?''', (cabinet['cabinet_id'],))
-        actual_total = cursor.fetchone()[0]
-        
-        # Read ACTUAL counts from Excel file
-        excel_path = cabinet.get('excel_path')
-        if excel_path and os.path.exists(excel_path):
-            excel_total, excel_implemented, excel_closed = self.db.count_punches_from_excel(excel_path)
-            excel_open = excel_total - excel_implemented - excel_closed
-            excel_status = "✓ File found and read"
-        else:
-            excel_total = excel_implemented = excel_closed = excel_open = 0
-            excel_status = "✗ File not found"
-        
-        # Get detailed breakdown
-        debug_info = f"""Cabinet Debug Information
-        
-Cabinet ID: {cabinet['cabinet_id']}
-Project: {cabinet['project_name']}
-
-=== Excel File ===
-Path: {excel_path or 'Not specified'}
-Status: {excel_status}
-
-=== ACTUAL Counts from Excel ===
-Total Punches: {excel_total}
-Implemented: {excel_implemented}
-Closed: {excel_closed}
-Open: {excel_open}
-
-=== Stored in Database (OLD - may be outdated) ===
-Total: {cabinet['total_punches']}
-Implemented: {cabinet['implemented_punches']}
-Closed: {cabinet['closed_punches']}
-
-=== Category Occurrences Table ===
-Total Logged Punches: {actual_total}
-
-"""
-        
-        # Get punch details from category_occurrences
-        cursor.execute('''SELECT category, subcategory, occurrence_date 
-                         FROM category_occurrences 
-                         WHERE cabinet_id = ?
-                         ORDER BY occurrence_date DESC''', (cabinet['cabinet_id'],))
-        punches = cursor.fetchall()
-        
-        if punches:
-            debug_info += "\n=== Logged Punches (from category_occurrences) ===\n"
-            for idx, (cat, subcat, date) in enumerate(punches, 1):
-                debug_info += f"{idx}. {cat}"
-                if subcat:
-                    debug_info += f" → {subcat}"
-                debug_info += f" ({date})\n"
-        
-        conn.close()
-        
-        # Show in a dialog
-        debug_window = tk.Toplevel(self.root)
-        debug_window.title(f"Debug: {cabinet['cabinet_id']}")
-        debug_window.geometry("700x600")
-        
-        # Add scrollbar
-        scroll_frame = tk.Frame(debug_window)
-        scroll_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        scrollbar = tk.Scrollbar(scroll_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        text_widget = tk.Text(scroll_frame, wrap=tk.WORD, font=('Courier New', 9),
-                             yscrollcommand=scrollbar.set)
-        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=text_widget.yview)
-        
-        text_widget.insert('1.0', debug_info)
-        text_widget.config(state=tk.DISABLED)
-        
-        tk.Button(debug_window, text="Close", command=debug_window.destroy,
-                 bg='#3b82f6', fg='white', font=('Segoe UI', 10, 'bold'),
-                 padx=20, pady=8).pack(pady=10)
     
     # ============ ANALYTICS - INTEGRATED SEARCH WITH FILTERS ============
     def show_analytics(self):
@@ -1300,32 +1283,6 @@ Total Logged Punches: {actual_total}
                          padx=10, pady=5, relief=tk.FLAT, cursor='hand2').pack(side=tk.LEFT, padx=2)
     
     # Category management methods (keeping existing implementation)
-    # ============================================================================
-    # UPDATED CATEGORY MANAGEMENT FUNCTIONS
-    # With reference number support and wiring selector handling
-    # Replace these methods in your CategoryManager class
-    # ============================================================================
-    def refresh_ui(self):
-        """Smart refresh that finds the right method in your UI"""
-        # Tries common method names:
-        if hasattr(self, 'show_categories'):
-            self.show_categories()
-        elif hasattr(self, 'refresh_categories'):
-            self.refresh_categories()
-        elif hasattr(self, 'load_categories_ui'):
-            self.load_categories_ui()
-        elif hasattr(self, 'display_categories'):
-            self.display_categories()
-        # ... etc
-        else:
-            # Fallback: just show success
-            messagebox.showinfo("Success", "Changes saved")
-
-    # ============================================================================
-    # FIXED CATEGORY MANAGEMENT FUNCTIONS FOR ManagerUI
-    # Replace self.show_categories() with appropriate refresh method
-    # ============================================================================
-
     def collect_template_data(self, mandatory=True, existing=None):
         """Collect or edit inputs + template."""
         min_inputs = 1 if mandatory else 0
@@ -1378,61 +1335,11 @@ Total Logged Punches: {actual_total}
             return None
         
         return {"inputs": inputs, "template": template.strip() if template else None}
-
-
-    def collect_reference_number(self, existing=None):
-        """Collect reference number (01-99 or empty)"""
-        default_ref = existing.get("ref_number", "") if existing else ""
-        
-        ref_no = simpledialog.askstring(
-            "Reference Number",
-            "Enter reference number (01-99):\nLeave empty if user should enter manually (like Design Error)",
-            parent=self.root,
-            initialvalue=default_ref
-        )
-        
-        # Allow empty (for Design Error type categories)
-        if ref_no is None:
-            return None
-        
-        ref_no = ref_no.strip()
-        
-        # Validate if not empty
-        if ref_no:
-            try:
-                ref_int = int(ref_no)
-                if ref_int < 1 or ref_int > 99:
-                    messagebox.showerror("Invalid", "Reference number must be between 01-99")
-                    return None
-                # Format as two digits
-                ref_no = f"{ref_int:02d}"
-            except ValueError:
-                messagebox.showerror("Invalid", "Reference number must be a number")
-                return None
-        
-        return ref_no
-
-
-    def refresh_ui(self):
-        """✨ HELPER: Refresh the UI after category changes"""
-        # Try common refresh method names
-        if hasattr(self, 'show_categories'):
-            self.show_categories()
-        elif hasattr(self, 'refresh_categories'):
-            self.refresh_categories()
-        elif hasattr(self, 'load_categories_ui'):
-            self.load_categories_ui()
-        elif hasattr(self, 'display_categories'):
-            self.display_categories()
-        elif hasattr(self, 'update_category_display'):
-            self.update_category_display()
-        else:
-            # Just show success message if no refresh method found
-            messagebox.showinfo("Success", "Changes saved. Please refresh manually if needed.")
-
-
+    
+    # ============================================================
+    # CATEGORY / SUBCATEGORY CRUD HELPERS
+    # ============================================================
     def create_category(self):
-        """Create category with mode and reference number support"""
         name = simpledialog.askstring("New Category", "Enter category name:", parent=self.root)
         if not name:
             return None
@@ -1445,516 +1352,29 @@ Total Logged Punches: {actual_total}
             "subcategories": []
         }
         
-        # Ask for category type
-        mode_dialog = tk.Toplevel(self.root)
-        mode_dialog.title("Select Category Type")
-        mode_dialog.geometry("400x300")
-        mode_dialog.transient(self.root)
-        mode_dialog.grab_set()
+        use_template = messagebox.askyesno(
+            "Category Type",
+            "Does this category directly generate punch text?\n\nYES → Template category\nNO → Parent category",
+            parent=self.root
+        )
         
-        result = [None]
-        
-        tk.Label(mode_dialog, text="What type of category is this?", 
-                 font=('Segoe UI', 12, 'bold')).pack(pady=20)
-        
-        def select_template():
-            result[0] = 'template'
-            mode_dialog.destroy()
-        
-        def select_parent():
-            result[0] = 'parent'
-            mode_dialog.destroy()
-        
-        def select_wiring():
-            result[0] = 'wiring_selector'
-            mode_dialog.destroy()
-        
-        tk.Button(mode_dialog, text="Template Category\n(like Faulty Equipment)", 
-                  command=select_template, width=30, height=3).pack(pady=5)
-        tk.Button(mode_dialog, text="Parent Category\n(like Material Shortfall)", 
-                  command=select_parent, width=30, height=3).pack(pady=5)
-        tk.Button(mode_dialog, text="Wiring Selector\n(like Wrong Wiring)", 
-                  command=select_wiring, width=30, height=3).pack(pady=5)
-        
-        mode_dialog.wait_window()
-        
-        if not result[0]:
-            return None
-        
-        # ========== TEMPLATE CATEGORY ==========
-        if result[0] == 'template':
+        if use_template:
             category["mode"] = "template"
-            
-            ref_no = self.collect_reference_number()
-            if ref_no is None:
-                return None
-            category["ref_number"] = ref_no
-            
             data = self.collect_template_data(mandatory=False)
             if data:
                 category.update(data)
-        
-        # ========== WIRING SELECTOR CATEGORY ==========
-        elif result[0] == 'wiring_selector':
-            category["mode"] = "wiring_selector"
-            category["wiring_types"] = []
-            category["special_subcategories"] = []
-            
-            add_wiring = messagebox.askyesno(
-                "Add Wiring Types",
-                "Do you want to add Power/I/O/Ground wiring types now?\n\n(You can add them later)",
-                parent=self.root
-            )
-            
-            if add_wiring:
-                for wiring_name, ref in [("Power Wiring", "14"), ("I/O Wiring", "15"), ("Ground Wiring", "16")]:
-                    add_this = messagebox.askyesno(
-                        "Add Wiring Type",
-                        f"Add '{wiring_name}' with ref [{ref}]?",
-                        parent=self.root
-                    )
-                    if add_this:
-                        category["wiring_types"].append({
-                            "type": wiring_name,
-                            "ref_number": ref,
-                            "subcategories": []
-                        })
-        
-        # ========== PARENT CATEGORY ==========
         else:
             category["mode"] = "parent"
-            
-            ref_no = self.collect_reference_number()
-            if ref_no is None:
-                return None
-            category["ref_number"] = ref_no
         
         return category
-
-
-    def add_category(self):
-        """Add new category"""
-        cat = self.create_category()
-        if not cat:
-            return
-        
-        if any(c["name"].lower() == cat["name"].lower() for c in self.categories):
-            messagebox.showwarning("Duplicate", "Category already exists")
-            return
-        
-        self.categories.append(cat)
-        self.save_categories()
-        self.refresh_ui()  # ✨ CHANGED
-
-
-    def edit_category(self, category):
-        """Edit category with reference number support"""
-        mode = category.get('mode')
-        
-        if not mode:
-            if 'wiring_types' in category:
-                mode = 'wiring_selector'
-            else:
-                mode = 'parent' if category.get('subcategories') else 'template'
-            category['mode'] = mode
-        
-        # ========== TEMPLATE CATEGORY ==========
-        if mode == 'template':
-            if category.get('inputs'):
-                updated = self.edit_template_definition(
-                    "Edit Category",
-                    existing=category,
-                    require_inputs=True
-                )
-                if not updated:
-                    return
-                
-                ref_no = self.collect_reference_number(existing=category)
-                if ref_no is None:
-                    return
-                
-                category.clear()
-                category.update(updated)
-                category["mode"] = "template"
-                category["ref_number"] = ref_no
-            else:
-                new_name = simpledialog.askstring(
-                    "Edit Category",
-                    "Enter new category name:",
-                    initialvalue=category["name"],
-                    parent=self.root
-                )
-                if not new_name:
-                    return
-                
-                new_template = simpledialog.askstring(
-                    "Edit Template",
-                    "Enter punch text template:",
-                    initialvalue=category.get("template", ""),
-                    parent=self.root
-                )
-                if new_template is None:
-                    return
-                
-                ref_no = self.collect_reference_number(existing=category)
-                if ref_no is None:
-                    return
-                
-                category["name"] = new_name.strip()
-                category["template"] = new_template.strip()
-                category["ref_number"] = ref_no
-        
-        # ========== WIRING SELECTOR CATEGORY ==========
-        elif mode == "wiring_selector":
-            new_name = simpledialog.askstring(
-                "Edit Category",
-                "Enter new category name:",
-                initialvalue=category["name"],
-                parent=self.root
-            )
-            if not new_name:
-                return
-            category["name"] = new_name.strip()
-        
-        # ========== PARENT CATEGORY ==========
-        elif mode == "parent":
-            new_name = simpledialog.askstring(
-                "Edit Category",
-                "Enter new category name:",
-                initialvalue=category["name"],
-                parent=self.root
-            )
-            if not new_name:
-                return
-            
-            ref_no = self.collect_reference_number(existing=category)
-            if ref_no is None:
-                return
-            
-            category["name"] = new_name.strip()
-            category["ref_number"] = ref_no
-        
-        self.save_categories()
-        self.refresh_ui()  # ✨ CHANGED
-
-
-    def delete_category(self, category):
-        """Delete category"""
-        if not messagebox.askyesno("Confirm", f"Delete category '{category['name']}'?"):
-            return
-        self.categories.remove(category)
-        self.save_categories()
-        self.refresh_ui()  # ✨ CHANGED
-
-
-    def add_subcategory(self, category):
-        """Add subcategory with reference number"""
-        name = simpledialog.askstring("New Subcategory", "Enter subcategory name:", parent=self.root)
-        if not name:
-            return
-        
-        ref_no = self.collect_reference_number()
-        if ref_no is None:
-            return
-        
-        data = self.collect_template_data(mandatory=True)
-        if not data:
-            return
-        
-        if 'subcategories' not in category:
-            category['subcategories'] = []
-        
-        subcategory = {
-            "name": name.strip(),
-            "ref_number": ref_no,
-            **data
-        }
-        
-        category["subcategories"].append(subcategory)
-        self.save_categories()
-        self.refresh_ui()  # ✨ CHANGED
-
-
-    def edit_subcategory(self, category, subcategory):
-        """Edit subcategory with reference number"""
-        if subcategory.get('inputs'):
-            updated = self.edit_template_definition(
-                "Edit Subcategory",
-                existing=subcategory,
-                require_inputs=True
-            )
-            if not updated:
-                return
-            
-            ref_no = self.collect_reference_number(existing=subcategory)
-            if ref_no is None:
-                return
-            
-            subcategory.clear()
-            subcategory.update(updated)
-            subcategory["ref_number"] = ref_no
-        else:
-            new_name = simpledialog.askstring(
-                "Edit Subcategory",
-                "Enter new name:",
-                initialvalue=subcategory['name'],
-                parent=self.root
-            )
-            if not new_name:
-                return
-            
-            new_template = simpledialog.askstring(
-                "Edit Template",
-                "Enter new template:",
-                initialvalue=subcategory.get('template', ''),
-                parent=self.root
-            )
-            if new_template is None:
-                return
-            
-            ref_no = self.collect_reference_number(existing=subcategory)
-            if ref_no is None:
-                return
-            
-            subcategory['name'] = new_name.strip()
-            subcategory['template'] = new_template
-            subcategory["ref_number"] = ref_no
-        
-        self.save_categories()
-        self.refresh_ui()  # ✨ CHANGED
-
-
-    def delete_subcategory(self, category, sub):
-        """Delete subcategory"""
-        if not messagebox.askyesno("Confirm", f"Delete subcategory '{sub['name']}'?"):
-            return
-        
-        if 'subcategories' in category:
-            category['subcategories'].remove(sub)
-            self.save_categories()
-            self.refresh_ui()  # ✨ CHANGED
-
-
-    # ============================================================================
-    # WIRING TYPE MANAGEMENT
-    # ============================================================================
-
-    def add_wiring_type(self, category):
-        """Add wiring type to wiring selector category"""
-        if category.get("mode") != "wiring_selector":
-            messagebox.showerror("Error", "This is not a wiring selector category")
-            return
-        
-        # Ask which wiring type
-        wiring_dialog = tk.Toplevel(self.root)
-        wiring_dialog.title("Add Wiring Type")
-        wiring_dialog.geometry("350x200")
-        wiring_dialog.transient(self.root)
-        wiring_dialog.grab_set()
-        
-        result = [None]
-        
-        def select_standard():
-            result[0] = 'standard'
-            wiring_dialog.destroy()
-        
-        def select_custom():
-            result[0] = 'custom'
-            wiring_dialog.destroy()
-        
-        tk.Label(wiring_dialog, text="Select wiring type:", font=('Segoe UI', 12, 'bold')).pack(pady=20)
-        tk.Button(wiring_dialog, text="Standard (Power/I/O/Ground)", 
-                  command=select_standard, width=25, height=2).pack(pady=5)
-        tk.Button(wiring_dialog, text="Custom", 
-                  command=select_custom, width=25, height=2).pack(pady=5)
-        
-        wiring_dialog.wait_window()
-        
-        if not result[0]:
-            return
-        
-        if result[0] == 'standard':
-            # Standard wiring types
-            available = []
-            if not any(w.get("type") == "Power Wiring" for w in category.get("wiring_types", [])):
-                available.append(("Power Wiring", "14"))
-            if not any(w.get("type") == "I/O Wiring" for w in category.get("wiring_types", [])):
-                available.append(("I/O Wiring", "15"))
-            if not any(w.get("type") == "Ground Wiring" for w in category.get("wiring_types", [])):
-                available.append(("Ground Wiring", "16"))
-            
-            if not available:
-                messagebox.showinfo("Info", "All standard wiring types already added")
-                return
-            
-            choice_msg = "Select wiring type to add:\n\n"
-            for i, (name, ref) in enumerate(available, 1):
-                choice_msg += f"{i}. {name} [Ref: {ref}]\n"
-            
-            choice = simpledialog.askinteger(
-                "Select Type",
-                choice_msg,
-                parent=self.root,
-                minvalue=1,
-                maxvalue=len(available)
-            )
-            
-            if not choice:
-                return
-            
-            wiring_name, ref_no = available[choice - 1]
-        
-        else:
-            # Custom wiring type
-            wiring_name = simpledialog.askstring(
-                "Wiring Type Name",
-                "Enter custom wiring type name:",
-                parent=self.root
-            )
-            if not wiring_name:
-                return
-            
-            ref_no = self.collect_reference_number()
-            if ref_no is None:
-                return
-        
-        wiring_type = {
-            "type": wiring_name.strip(),
-            "ref_number": ref_no,
-            "subcategories": []
-        }
-        
-        if "wiring_types" not in category:
-            category["wiring_types"] = []
-        
-        category["wiring_types"].append(wiring_type)
-        self.save_categories()
-        self.refresh_ui()  # ✨ CHANGED
-
-
-    def add_wiring_subcategory(self, category, wiring_type):
-        """Add subcategory to a specific wiring type"""
-        name = simpledialog.askstring(
-            "New Wiring Subcategory",
-            f"Enter subcategory name for {wiring_type['type']}:",
-            parent=self.root
-        )
-        if not name:
-            return
-        
-        data = self.collect_template_data(mandatory=True)
-        if not data:
-            return
-        
-        if 'subcategories' not in wiring_type:
-            wiring_type['subcategories'] = []
-        
-        wiring_type["subcategories"].append({
-            "name": name.strip(),
-            **data
-        })
-        
-        self.save_categories()
-        self.refresh_ui()  # ✨ CHANGED
-
-
-    def edit_wiring_type(self, category, wiring_type):
-        """Edit wiring type"""
-        new_name = simpledialog.askstring(
-            "Edit Wiring Type",
-            "Enter new wiring type name:",
-            initialvalue=wiring_type.get("type", ""),
-            parent=self.root
-        )
-        if not new_name:
-            return
-        
-        ref_no = self.collect_reference_number(existing=wiring_type)
-        if ref_no is None:
-            return
-        
-        wiring_type["type"] = new_name.strip()
-        wiring_type["ref_number"] = ref_no
-        
-        self.save_categories()
-        self.refresh_ui()  # ✨ CHANGED
-
-
-    def delete_wiring_type(self, category, wiring_type):
-        """Delete wiring type"""
-        if not messagebox.askyesno(
-            "Confirm",
-            f"Delete wiring type '{wiring_type.get('type')}'?\n\nThis will also delete all its subcategories."
-        ):
-            return
-        
-        if "wiring_types" in category:
-            category["wiring_types"].remove(wiring_type)
-            self.save_categories()
-            self.refresh_ui()  # ✨ CHANGED
-
-
-    def add_special_subcategory(self, category):
-        """Add special subcategory that bypasses wiring type (like Ferrule Wrong)"""
-        if category.get("mode") != "wiring_selector":
-            messagebox.showerror("Error", "This is not a wiring selector category")
-            return
-        
-        name = simpledialog.askstring(
-            "Special Subcategory",
-            "Enter name (e.g., 'Ferrule Wrong'):\n\nThis will bypass wiring type selection.",
-            parent=self.root
-        )
-        if not name:
-            return
-        
-        ref_no = self.collect_reference_number()
-        if ref_no is None:
-            return
-        
-        data = self.collect_template_data(mandatory=True)
-        if not data:
-            return
-        
-        if "special_subcategories" not in category:
-            category["special_subcategories"] = []
-        
-        category["special_subcategories"].append({
-            "name": name.strip(),
-            "ref_number": ref_no,
-            **data
-        })
-        
-        self.save_categories()
-        self.refresh_ui()  # ✨ CHANGED
-
-
-    # ============================================================================
-    # HELPER METHODS
-    # ============================================================================
-
-    def edit_template_definition(self, title, existing, require_inputs):
-        """Edit a template definition"""
-        new_name = simpledialog.askstring(
-            title,
-            "Enter new name:",
-            initialvalue=existing.get("name", ""),
-            parent=self.root
-        )
-        if not new_name:
-            return None
-        
-        data = self.collect_template_data(mandatory=require_inputs, existing=existing)
-        if not data:
-            return None
-        
-        result = {"name": new_name.strip()}
-        result.update(data)
-        return result
-
-
+    
     def run_template(self, template_def, tag_name=None):
-        """Execute a template definition at runtime"""
+        """
+        Execute a template definition at runtime:
+        - ask for inputs
+        - optionally inject tag_name
+        - return final punch text
+        """
         values = {}
         if tag_name:
             values["tag"] = tag_name
@@ -1974,38 +1394,206 @@ Total Logged Punches: {actual_total}
         except KeyError as e:
             messagebox.showerror("Template Error", f"Missing placeholder: {e}")
             return None
-
-
+    
+    def add_category(self):
+        cat = self.create_category()
+        if not cat:
+            return
+        
+        if any(c["name"].lower() == cat["name"].lower() for c in self.categories):
+            messagebox.showwarning("Duplicate", "Category already exists")
+            return
+        
+        self.categories.append(cat)
+        self.save_categories()
+        self.show_categories()
+    
+    def edit_category(self, category):
+        # Check if this is a new-style category with mode field and inputs
+        mode = category.get('mode')
+        
+        # If no mode field, infer from structure
+        if not mode:
+            mode = 'parent' if category.get('subcategories') else 'template'
+            category['mode'] = mode  # Add mode field
+        
+        # TEMPLATE CATEGORY
+        if mode == 'template':
+            # Check if it has the full input structure or just a simple template
+            if category.get('inputs'):
+                # New style with inputs - use full template definition editor
+                updated = self.edit_template_definition(
+                    "Edit Category",
+                    existing=category,
+                    require_inputs=True
+                )
+                if not updated:
+                    return
+                category.clear()
+                category.update(updated)
+                category["mode"] = "template"
+            else:
+                # Old style - just edit name and simple template
+                new_name = simpledialog.askstring(
+                    "Edit Category",
+                    "Enter new category name:",
+                    initialvalue=category["name"],
+                    parent=self.root
+                )
+                if not new_name:
+                    return
+                
+                new_template = simpledialog.askstring(
+                    "Edit Template",
+                    "Enter punch text template:",
+                    initialvalue=category.get("template", ""),
+                    parent=self.root
+                )
+                if new_template is None:
+                    return
+                
+                category["name"] = new_name.strip()
+                category["template"] = new_template.strip()
+        
+        # PARENT CATEGORY
+        elif mode == "parent":
+            new_name = simpledialog.askstring(
+                "Edit Category",
+                "Enter new category name:",
+                initialvalue=category["name"],
+                parent=self.root
+            )
+            if not new_name:
+                return
+            category["name"] = new_name.strip()
+        
+        self.save_categories()
+        self.show_categories()
+    
+    def edit_template_definition(self, title, existing, require_inputs):
+        """Edit a template definition (used for both categories and subcategories)"""
+        # Edit name
+        new_name = simpledialog.askstring(
+            title,
+            "Enter new name:",
+            initialvalue=existing.get("name", ""),
+            parent=self.root
+        )
+        if not new_name:
+            return None
+        
+        # Collect template data
+        data = self.collect_template_data(mandatory=require_inputs, existing=existing)
+        if not data:
+            return None
+        
+        result = {"name": new_name.strip()}
+        result.update(data)
+        return result
+    
+    def delete_category(self, category):
+        if not messagebox.askyesno("Confirm", f"Delete category '{category['name']}'?"):
+            return
+        self.categories.remove(category)
+        self.save_categories()
+        self.show_categories()
+    
     def handle_template_category(self, category, bbox_page=None):
         """Handle template category execution"""
+        # Check if it has inputs or just a simple template
         if category.get('inputs'):
+            # New style with inputs
             punch_text = self.run_template(category, tag_name=None)
             if not punch_text:
                 return
         else:
+            # Old style - just show the template as-is
             punch_text = category.get('template', 'No template defined')
         
-        ref_no = category.get('ref_number', 'No ref')
-        messagebox.showinfo(
-            "Generated Punch Text",
-            f"Category: {category['name']}\nRef: {ref_no}\n\nPunch Text:\n{punch_text}"
-        )
-
-
+        # For manager UI, just show the generated text
+        messagebox.showinfo("Generated Punch Text", 
+                          f"Category: {category['name']}\n\nPunch Text:\n{punch_text}")
+    
     def handle_subcategory(self, category, subcategory, bbox_page=None):
         """Handle subcategory execution"""
+        # Check if it has inputs or just a simple template
         if subcategory.get('inputs'):
+            # New style with inputs
             punch_text = self.run_template(subcategory, tag_name=None)
             if not punch_text:
                 return
         else:
+            # Old style - just show the template as-is
             punch_text = subcategory.get('template', 'No template defined')
         
-        ref_no = subcategory.get('ref_number', 'No ref')
-        messagebox.showinfo(
-            "Generated Punch Text",
-            f"Category: {category['name']}\nSubcategory: {subcategory['name']}\nRef: {ref_no}\n\nPunch Text:\n{punch_text}"
-        )
+        # For manager UI, just show the generated text
+        messagebox.showinfo("Generated Punch Text",
+                          f"Category: {category['name']}\nSubcategory: {subcategory['name']}\n\nPunch Text:\n{punch_text}")
+    
+    def add_subcategory(self, category):
+        name = simpledialog.askstring("New Subcategory", "Enter subcategory name:", parent=self.root)
+        if not name:
+            return
+        
+        data = self.collect_template_data(mandatory=True)
+        if not data:
+            return
+        
+        if 'subcategories' not in category:
+            category['subcategories'] = []
+        
+        category["subcategories"].append({"name": name.strip(), **data})
+        self.save_categories()
+        self.show_categories()
+    
+    def edit_subcategory(self, category, subcategory):
+        # Check if subcategory has the full input structure or just simple template
+        if subcategory.get('inputs'):
+            # New style with inputs - use full template definition editor
+            updated = self.edit_template_definition(
+                "Edit Subcategory",
+                existing=subcategory,
+                require_inputs=True
+            )
+            if not updated:
+                return
+            subcategory.clear()
+            subcategory.update(updated)
+        else:
+            # Old style - just edit name and simple template
+            new_name = simpledialog.askstring(
+                "Edit Subcategory",
+                "Enter new name:",
+                initialvalue=subcategory['name'],
+                parent=self.root
+            )
+            if not new_name:
+                return
+            
+            new_template = simpledialog.askstring(
+                "Edit Template",
+                "Enter new template:",
+                initialvalue=subcategory.get('template', ''),
+                parent=self.root
+            )
+            if new_template is None:
+                return
+            
+            subcategory['name'] = new_name.strip()
+            subcategory['template'] = new_template
+        
+        self.save_categories()
+        self.show_categories()
+    
+    def delete_subcategory(self, category, sub):
+        if not messagebox.askyesno("Confirm", f"Delete subcategory '{sub['name']}'?"):
+            return
+        
+        if 'subcategories' in category:
+            category['subcategories'].remove(sub)
+            self.save_categories()
+            self.show_categories()
+    
     # ============ NEW: TEMPLATE EXCEL EDITOR ============
     def show_template_editor(self):
         """Template Excel editor interface"""
