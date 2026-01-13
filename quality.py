@@ -1952,28 +1952,28 @@ class CircuitInspector:
         
         # Default fallback
         return fitz.Point(rect.x1 + offset, rect.y0)
-
+    
     def export_annotated_pdf(self):
         """Export PDF with all annotations including highlighter strokes"""
         if not self.pdf_document:
             messagebox.showwarning("Warning", "Please load a PDF first")
             return
-
+    
         if not hasattr(self, 'project_dirs') or not self.project_dirs.get("annotated_drawings"):
             messagebox.showerror("Error", "Project directories not set up.")
             return
-
+    
         try:
             save_path = os.path.join(
                 self.project_dirs["annotated_drawings"],
                 f"{self.cabinet_id.replace(' ', '_')}_Annotated.pdf"
             )
-
+    
             # Create output PDF
             out_doc = fitz.open()
             for pnum in range(len(self.pdf_document)):
                 out_doc.insert_pdf(self.pdf_document, from_page=pnum, to_page=pnum)
-
+    
             # Open Excel for SR No lookup
             wb = None
             ws = None
@@ -1983,17 +1983,17 @@ class CircuitInspector:
                     ws = wb[self.punch_sheet_name]
                 except:
                     pass
-
+    
             # Draw annotations
             for ann in self.annotations:
                 p = ann.get('page')
                 if p is None or p < 0 or p >= len(out_doc):
                     continue
-
+    
                 target_page = out_doc[p]
                 ann_type = ann.get('type')
-
-                # -------- HIGHLIGHTER ANNOTATIONS (NEW) --------
+    
+                # -------- HIGHLIGHTER ANNOTATIONS --------
                 if ann_type == 'highlight' and 'points_page' in ann:
                     points_page = ann['points_page']
                     if len(points_page) >= 2:
@@ -2019,11 +2019,17 @@ class CircuitInspector:
                             annot.set_opacity(0.4)  # Semi-transparent
                             annot.update()
                             
-                            # Add SR number text if available (for error highlights)
-                            if color_key == 'orange' and 'bbox_page' in ann:
+                            # ✅ Add SR number text for BOTH orange AND green highlights
+                            if color_key in ['orange', 'green'] and 'bbox_page' in ann:
                                 sr_text = None
                                 row = ann.get('excel_row')
-                                if row and ws:
+                                sr_no = ann.get('sr_no')  # Try to get from annotation first
+                                
+                                # If SR number is stored in annotation, use it
+                                if sr_no is not None:
+                                    sr_text = f"Sr {sr_no}"
+                                # Otherwise, try to read from Excel
+                                elif row and ws:
                                     try:
                                         sr_val = self.read_cell(ws, row, self.punch_cols['sr_no'])
                                         if sr_val is not None:
@@ -2040,17 +2046,21 @@ class CircuitInspector:
                                     )
                                     # Position text beside the highlight
                                     text_pos = self.get_text_position_for_highlight(bbox_rect, target_page)
+                                    
+                                    # Use different color for green vs orange
+                                    text_color = (0, 0.5, 0) if color_key == 'green' else (1, 0, 0)
+                                    
                                     try:
                                         target_page.insert_text(
                                             text_pos, 
                                             sr_text, 
                                             fontsize=8, 
-                                            color=(1, 0, 0)
+                                            color=text_color
                                         )
                                     except:
                                         pass
-
-
+    
+    
                 # -------- PEN STROKES --------
                 elif ann_type == 'pen' and 'points' in ann:
                     points = ann['points']
@@ -2066,7 +2076,7 @@ class CircuitInspector:
                             p1 = transformed_points[i]
                             p2 = transformed_points[i + 1]
                             target_page.draw_line(p1, p2, color=(1, 0, 0), width=2)
-
+    
                 # -------- TEXT ANNOTATIONS --------
                 elif ann_type == 'text' and 'pos_page' in ann:
                     pos = ann['pos_page']
@@ -2081,16 +2091,16 @@ class CircuitInspector:
                             )
                         except:
                             pass
-
+    
             if wb:
                 wb.close()
-
+    
             out_doc.save(save_path)
             out_doc.close()
-
+    
             messagebox.showinfo("Success", f"Annotated PDF saved to:\n{save_path}")
             self.sync_manager_stats_only()
-
+    
         except PermissionError:
             messagebox.showerror("Error", "Close the target file (if open) and try again.")
         except Exception as e:
@@ -3813,33 +3823,33 @@ class CircuitInspector:
     # NEW: punch_closing_mode_for_verification - Modified punch closing for handback
     # ============================================================================
 
-    def punch_closing_mode_for_verification(self, item_data):
-        """Punch closing mode specifically for verification workflow - Converts orange to green"""
-        
+    def punch_closing_mode(self):
+        """Modern dialog for punch closing workflow - Converts orange to green highlights"""
         punches = self.read_open_punches_from_excel()
-        
+    
         if not punches:
-            # All closed, proceed to finalization
-            self.finalize_verification(item_data)
+            messagebox.showinfo("No Open Punches", 
+                              "✓ All punches are closed!\nNo items require attention.",
+                              icon='info')
             return
-        
+    
         punches.sort(key=lambda p: (not p['implemented'], p['sr_no']))
-        
-        # Dialog
+    
+        # Modern dialog window
         dlg = tk.Toplevel(self.root)
-        dlg.title("Punch Verification Mode")
-        dlg.geometry("950x600")
+        dlg.title("Punch Closing Mode")
+        dlg.geometry("950x650")
         dlg.configure(bg='#f8fafc')
         dlg.transient(self.root)
         dlg.grab_set()
         
         # Header
-        header_frame = tk.Frame(dlg, bg='#7c3aed', height=50)
+        header_frame = tk.Frame(dlg, bg='#1e293b', height=50)
         header_frame.pack(fill=tk.X)
         header_frame.pack_propagate(False)
         
-        tk.Label(header_frame, text="✓ Punch Verification Mode", 
-                bg='#7c3aed', fg='white', 
+        tk.Label(header_frame, text="✓ Punch Closing Mode", 
+                bg='#1e293b', fg='white', 
                 font=('Segoe UI', 13, 'bold')).pack(pady=12)
         
         # Progress
@@ -3854,6 +3864,7 @@ class CircuitInspector:
         info_frame = tk.Frame(dlg, bg='#f8fafc')
         info_frame.pack(fill=tk.X, padx=20, pady=8)
         
+        # SR Number card
         sr_card = tk.Frame(info_frame, bg='#dbeafe', relief=tk.FLAT)
         sr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
@@ -3863,6 +3874,7 @@ class CircuitInspector:
                            bg='#dbeafe', fg='#1e293b')
         sr_label.pack(anchor='w', padx=10, pady=(0, 6))
         
+        # Reference card
         ref_card = tk.Frame(info_frame, bg='#e0e7ff', relief=tk.FLAT)
         ref_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
@@ -3872,6 +3884,7 @@ class CircuitInspector:
                             bg='#e0e7ff', fg='#1e293b')
         ref_label.pack(anchor='w', padx=10, pady=(0, 6))
         
+        # Status card
         status_card = tk.Frame(info_frame, bg='#fef3c7', relief=tk.FLAT)
         status_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
         
@@ -3893,16 +3906,18 @@ class CircuitInspector:
                              relief=tk.FLAT, padx=10, pady=8)
         text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
         text_widget.config(state=tk.DISABLED)
-
+    
         pos = [0]
-
+    
         def show_item():
             p = punches[pos[0]]
             
+            # Update progress
             progress_text = f"Item {pos[0]+1} of {len(punches)}"
             progress_pct = f"({int((pos[0]+1)/len(punches)*100)}% complete)"
             idx_label.config(text=f"{progress_text} {progress_pct}")
             
+            # Update info cards
             sr_label.config(text=str(p['sr_no']))
             ref_label.config(text=str(p['ref_no']))
             
@@ -3910,64 +3925,79 @@ class CircuitInspector:
             impl_color = '#10b981' if p['implemented'] else '#f59e0b'
             impl_label.config(text=impl_status, fg=impl_color)
             
+            # Update description
             text_widget.config(state=tk.NORMAL)
             text_widget.delete("1.0", tk.END)
             text_widget.insert(tk.END, p['punch_text'])
             text_widget.insert(tk.END, f"\n\n──────────────────\n")
             text_widget.insert(tk.END, f"Category: {p['category']}\n")
-
-            # UPDATED: Find annotation - checks for both SR number and excel row
+    
+            # Find annotation - checks for highlight type and old rectangle type
             ann = next((a for a in self.annotations 
                        if a.get('sr_no') == p['sr_no'] 
                        or (a.get('excel_row') == p['row'])), None)
             
-            if ann and ann.get('implementation_remark'):
+            if ann and ann.get('quality_remark'):
                 text_widget.insert(tk.END, f"\n──────────────────\n")
-                text_widget.insert(tk.END, "Implementation Remarks:\n")
-                text_widget.insert(tk.END, ann['implementation_remark'])
-            
-            # Show production remarks
-            try:
-                handover_data = self.handover_db.get_handover_by_cabinet(self.cabinet_id)
-                if handover_data and handover_data.get('production_remarks'):
-                    text_widget.insert(tk.END, f"\n\n──────────────────\n")
-                    text_widget.insert(tk.END, "🔧 Production Remarks:\n")
-                    text_widget.insert(tk.END, handover_data['production_remarks'])
-                    text_widget.insert(tk.END, f"\n\nRework by: {handover_data.get('rework_completed_by', 'N/A')}")
-                    text_widget.insert(tk.END, f"\nDate: {handover_data.get('rework_completed_date', 'N/A')[:10]}")
-            except Exception as e:
-                print(f"Could not load production remarks: {e}")
-
+                text_widget.insert(tk.END, "Quality Remarks:\n")
+                text_widget.insert(tk.END, ann['quality_remark'])
+    
             text_widget.config(state=tk.DISABLED)
-
+    
         show_item()
-
+    
+        def add_remark():
+            """Add quality-side remark to push cabinet back to production"""
+            p = punches[pos[0]]
+            
+            # Find annotation
+            ann = next((a for a in self.annotations 
+                       if a.get('sr_no') == p['sr_no'] 
+                       or (a.get('excel_row') == p['row'])), None)
+            
+            current_remark = ann.get('quality_remark', '') if ann else ''
+            
+            remark = simpledialog.askstring(
+                "Add Quality Remark", 
+                f"Enter quality remark for SR {p['sr_no']}:\n(This will be sent back to production)",
+                initialvalue=current_remark,
+                parent=dlg
+            )
+            
+            if remark is not None:  # Allow empty string to clear remark
+                if ann:
+                    ann['quality_remark'] = remark
+                    messagebox.showinfo("Success", "Quality remark added successfully!")
+                    show_item()  # Refresh display
+                else:
+                    messagebox.showwarning("Warning", "No annotation found for this punch item.")
+    
         def close_punch():
             p = punches[pos[0]]
-
+    
             try:
                 default_user = os.getlogin()
             except:
                 default_user = getpass.getuser()
-
+    
             name = simpledialog.askstring("Closed By", 
                                          "Enter your name to close this punch:", 
                                          initialvalue=default_user, 
                                          parent=dlg)
             if not name:
                 return
-
+    
             try:
                 wb = load_workbook(self.excel_file)
                 ws = wb[self.punch_sheet_name]
-
+    
                 self.write_cell(ws, p['row'], self.punch_cols['closed_name'], name)
                 self.write_cell(ws, p['row'], self.punch_cols['closed_date'], 
                               datetime.now().strftime("%Y-%m-%d"))
-
+    
                 wb.save(self.excel_file)
                 wb.close()
-
+    
             except PermissionError:
                 messagebox.showerror("File Locked", 
                                    "⚠️ Please close the Excel file and try again.")
@@ -3975,58 +4005,54 @@ class CircuitInspector:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to close punch:\n{e}")
                 return
-
-            # ============================================================
-            # UPDATED: Find and convert annotation color from orange to green
-            # ============================================================
+    
+            # Find and convert annotation color from orange to green
             ann = next((a for a in self.annotations 
                        if a.get('sr_no') == p['sr_no'] 
                        or (a.get('excel_row') == p['row'])), None)
             
             if ann:
-                # ✅ Convert orange highlight to green (KEEP the annotation)
+                # Convert orange highlight to green (KEEP the annotation)
                 if ann.get('type') == 'highlight' and ann.get('color') == 'orange':
                     ann['color'] = 'green'  # Change from error to OK
-                    print(f"✓ Verification: Converted annotation to green for SR {p['sr_no']}")
+                    print(f"✓ Converted annotation to green for SR {p['sr_no']}")
                 
-                # ✅ Also handle old rectangle-style error annotations
+                # Also handle old rectangle-style error annotations
                 elif ann.get('type') == 'error':
                     ann['type'] = 'ok'  # Convert error rectangle to OK
-                    print(f"✓ Verification: Converted error rectangle to OK for SR {p['sr_no']}")
+                    print(f"✓ Converted error rectangle to OK for SR {p['sr_no']}")
                 
-                # ✅ Store closure information
+                # Store closure information
                 ann['closed_by'] = name
                 ann['closed_date'] = datetime.now().strftime("%Y-%m-%d")
             else:
-                print(f"⚠️ Warning: No annotation found for SR {p['sr_no']} (Row {p['row']})")
-
-            # ✅ Refresh display to show green highlight
+                print(f"⚠️ Warning: No annotation found for SR {p['sr_no']}")
+    
+            # Refresh display to show green highlight
             self.display_page()
             
-            # ✅ Update stats after closing
+            # Update stats after closing
             self.sync_manager_stats_only()
-
+    
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
                 show_item()
             else:
-                messagebox.showinfo("All Punches Closed", 
-                                  f"✓ All punches verified and closed!\n{len(punches)} items processed.",
+                messagebox.showinfo("Complete", 
+                                  f"✓ All punches closed!\n{len(punches)} items processed.",
                                   icon='info')
                 dlg.destroy()
-                # Proceed to finalization
-                self.finalize_verification(item_data)
-
+    
         def next_item():
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
                 show_item()
-
+    
         def prev_item():
             if pos[0] > 0:
                 pos[0] -= 1
                 show_item()
-
+    
         # Buttons
         btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)
         btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))
@@ -4044,9 +4070,12 @@ class CircuitInspector:
             'pady': 18,
             'width': 15
         }
-
+    
         tk.Button(btn_container, text="◀  Previous", command=prev_item, 
                  bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+        
+        tk.Button(btn_container, text="📝 Add Remark", command=add_remark, 
+                 bg='#3b82f6', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
         
         close_btn_style = btn_style.copy()
         close_btn_style['width'] = 18
@@ -4058,9 +4087,8 @@ class CircuitInspector:
         
         tk.Button(btn_container, text="Cancel", command=dlg.destroy, 
                  bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-
+    
         dlg.wait_window()
-
 
     # ============================================================================
     # NEW: finalize_verification - Check checklist, save Excel, export PDF
@@ -4384,33 +4412,33 @@ class CircuitInspector:
         except Exception as e:
             print(f"Error counting open punches: {e}")
             return 0
-    def punch_closing_mode(self):
-        """Modern dialog for punch closing workflow - Converts orange to green highlights"""
+    def punch_closing_mode_for_verification(self, item_data):
+        """Punch closing mode specifically for verification workflow - Converts orange to green"""
+        
         punches = self.read_open_punches_from_excel()
-
+        
         if not punches:
-            messagebox.showinfo("No Open Punches", 
-                              "✓ All punches are closed!\nNo items require attention.",
-                              icon='info')
+            # All closed, proceed to finalization
+            self.finalize_verification(item_data)
             return
-
+        
         punches.sort(key=lambda p: (not p['implemented'], p['sr_no']))
-
-        # Modern dialog window
+        
+        # Dialog
         dlg = tk.Toplevel(self.root)
-        dlg.title("Punch Closing Mode")
-        dlg.geometry("950x600")
+        dlg.title("Punch Verification Mode")
+        dlg.geometry("950x650")
         dlg.configure(bg='#f8fafc')
         dlg.transient(self.root)
         dlg.grab_set()
         
         # Header
-        header_frame = tk.Frame(dlg, bg='#1e293b', height=50)
+        header_frame = tk.Frame(dlg, bg='#7c3aed', height=50)
         header_frame.pack(fill=tk.X)
         header_frame.pack_propagate(False)
         
-        tk.Label(header_frame, text="✓ Punch Closing Mode", 
-                bg='#1e293b', fg='white', 
+        tk.Label(header_frame, text="✓ Punch Verification Mode", 
+                bg='#7c3aed', fg='white', 
                 font=('Segoe UI', 13, 'bold')).pack(pady=12)
         
         # Progress
@@ -4425,7 +4453,6 @@ class CircuitInspector:
         info_frame = tk.Frame(dlg, bg='#f8fafc')
         info_frame.pack(fill=tk.X, padx=20, pady=8)
         
-        # SR Number card
         sr_card = tk.Frame(info_frame, bg='#dbeafe', relief=tk.FLAT)
         sr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
@@ -4435,7 +4462,6 @@ class CircuitInspector:
                            bg='#dbeafe', fg='#1e293b')
         sr_label.pack(anchor='w', padx=10, pady=(0, 6))
         
-        # Reference card
         ref_card = tk.Frame(info_frame, bg='#e0e7ff', relief=tk.FLAT)
         ref_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
@@ -4445,7 +4471,6 @@ class CircuitInspector:
                             bg='#e0e7ff', fg='#1e293b')
         ref_label.pack(anchor='w', padx=10, pady=(0, 6))
         
-        # Status card
         status_card = tk.Frame(info_frame, bg='#fef3c7', relief=tk.FLAT)
         status_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
         
@@ -4467,18 +4492,16 @@ class CircuitInspector:
                              relief=tk.FLAT, padx=10, pady=8)
         text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
         text_widget.config(state=tk.DISABLED)
-
+    
         pos = [0]
-
+    
         def show_item():
             p = punches[pos[0]]
             
-            # Update progress
             progress_text = f"Item {pos[0]+1} of {len(punches)}"
             progress_pct = f"({int((pos[0]+1)/len(punches)*100)}% complete)"
             idx_label.config(text=f"{progress_text} {progress_pct}")
             
-            # Update info cards
             sr_label.config(text=str(p['sr_no']))
             ref_label.config(text=str(p['ref_no']))
             
@@ -4486,65 +4509,78 @@ class CircuitInspector:
             impl_color = '#10b981' if p['implemented'] else '#f59e0b'
             impl_label.config(text=impl_status, fg=impl_color)
             
-            # Update description
             text_widget.config(state=tk.NORMAL)
             text_widget.delete("1.0", tk.END)
             text_widget.insert(tk.END, p['punch_text'])
             text_widget.insert(tk.END, f"\n\n──────────────────\n")
             text_widget.insert(tk.END, f"Category: {p['category']}\n")
-
-            # Find annotation - checks for highlight type and old rectangle type
+    
+            # Find annotation - checks for both SR number and excel row
             ann = next((a for a in self.annotations 
                        if a.get('sr_no') == p['sr_no'] 
                        or (a.get('excel_row') == p['row'])), None)
             
-            if ann and ann.get('implementation_remark'):
+            if ann and ann.get('quality_remark'):
                 text_widget.insert(tk.END, f"\n──────────────────\n")
-                text_widget.insert(tk.END, "Implementation Remarks:\n")
-                text_widget.insert(tk.END, ann['implementation_remark'])
+                text_widget.insert(tk.END, "Quality Remarks:\n")
+                text_widget.insert(tk.END, ann['quality_remark'])
             
-            # Check for production remarks
-            try:
-                handover_data = self.handover_db.get_handover_by_cabinet(self.cabinet_id)
-                if handover_data and handover_data.get('production_remarks'):
-                    text_widget.insert(tk.END, f"\n\n──────────────────\n")
-                    text_widget.insert(tk.END, "🔧 Production Remarks:\n")
-                    text_widget.insert(tk.END, handover_data['production_remarks'])
-                    text_widget.insert(tk.END, f"\n\nRework by: {handover_data.get('rework_completed_by', 'N/A')}")
-                    text_widget.insert(tk.END, f"\nDate: {handover_data.get('rework_completed_date', 'N/A')[:10]}")
-            except Exception as e:
-                print(f"Could not load production remarks: {e}")
-
             text_widget.config(state=tk.DISABLED)
-
+    
         show_item()
-
+    
+        def add_remark():
+            """Add quality-side remark to push cabinet back to production"""
+            p = punches[pos[0]]
+            
+            # Find annotation
+            ann = next((a for a in self.annotations 
+                       if a.get('sr_no') == p['sr_no'] 
+                       or (a.get('excel_row') == p['row'])), None)
+            
+            current_remark = ann.get('quality_remark', '') if ann else ''
+            
+            remark = simpledialog.askstring(
+                "Add Quality Remark", 
+                f"Enter quality remark for SR {p['sr_no']}:\n(This will be sent back to production)",
+                initialvalue=current_remark,
+                parent=dlg
+            )
+            
+            if remark is not None:  # Allow empty string to clear remark
+                if ann:
+                    ann['quality_remark'] = remark
+                    messagebox.showinfo("Success", "Quality remark added successfully!")
+                    show_item()  # Refresh display
+                else:
+                    messagebox.showwarning("Warning", "No annotation found for this punch item.")
+    
         def close_punch():
             p = punches[pos[0]]
-
+    
             try:
                 default_user = os.getlogin()
             except:
                 default_user = getpass.getuser()
-
+    
             name = simpledialog.askstring("Closed By", 
                                          "Enter your name to close this punch:", 
                                          initialvalue=default_user, 
                                          parent=dlg)
             if not name:
                 return
-
+    
             try:
                 wb = load_workbook(self.excel_file)
                 ws = wb[self.punch_sheet_name]
-
+    
                 self.write_cell(ws, p['row'], self.punch_cols['closed_name'], name)
                 self.write_cell(ws, p['row'], self.punch_cols['closed_date'], 
                               datetime.now().strftime("%Y-%m-%d"))
-
+    
                 wb.save(self.excel_file)
                 wb.close()
-
+    
             except PermissionError:
                 messagebox.showerror("File Locked", 
                                    "⚠️ Please close the Excel file and try again.")
@@ -4552,56 +4588,56 @@ class CircuitInspector:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to close punch:\n{e}")
                 return
-
-            # ============================================================
-            # UPDATED: Find and convert annotation color from orange to green
-            # ============================================================
+    
+            # Find and convert annotation color from orange to green
             ann = next((a for a in self.annotations 
                        if a.get('sr_no') == p['sr_no'] 
                        or (a.get('excel_row') == p['row'])), None)
             
             if ann:
-                # ✅ Convert orange highlight to green (KEEP the annotation)
+                # Convert orange highlight to green (KEEP the annotation)
                 if ann.get('type') == 'highlight' and ann.get('color') == 'orange':
                     ann['color'] = 'green'  # Change from error to OK
-                    print(f"✓ Converted annotation to green for SR {p['sr_no']}")
+                    print(f"✓ Verification: Converted annotation to green for SR {p['sr_no']}")
                 
-                # ✅ Also handle old rectangle-style error annotations
+                # Also handle old rectangle-style error annotations
                 elif ann.get('type') == 'error':
                     ann['type'] = 'ok'  # Convert error rectangle to OK
-                    print(f"✓ Converted error rectangle to OK for SR {p['sr_no']}")
+                    print(f"✓ Verification: Converted error rectangle to OK for SR {p['sr_no']}")
                 
-                # ✅ Store closure information
+                # Store closure information
                 ann['closed_by'] = name
                 ann['closed_date'] = datetime.now().strftime("%Y-%m-%d")
             else:
-                print(f"⚠️ Warning: No annotation found for SR {p['sr_no']}")
-
-            # ✅ Refresh display to show green highlight
+                print(f"⚠️ Warning: No annotation found for SR {p['sr_no']} (Row {p['row']})")
+    
+            # Refresh display to show green highlight
             self.display_page()
             
-            # ✅ Update stats after closing
+            # Update stats after closing
             self.sync_manager_stats_only()
-
+    
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
                 show_item()
             else:
-                messagebox.showinfo("Complete", 
-                                  f"✓ All punches closed!\n{len(punches)} items processed.",
+                messagebox.showinfo("All Punches Closed", 
+                                  f"✓ All punches verified and closed!\n{len(punches)} items processed.",
                                   icon='info')
                 dlg.destroy()
-
+                # Proceed to finalization
+                self.finalize_verification(item_data)
+    
         def next_item():
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
                 show_item()
-
+    
         def prev_item():
             if pos[0] > 0:
                 pos[0] -= 1
                 show_item()
-
+    
         # Buttons
         btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)
         btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))
@@ -4619,9 +4655,12 @@ class CircuitInspector:
             'pady': 18,
             'width': 15
         }
-
+    
         tk.Button(btn_container, text="◀  Previous", command=prev_item, 
                  bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+        
+        tk.Button(btn_container, text="📝 Add Remark", command=add_remark, 
+                 bg='#3b82f6', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
         
         close_btn_style = btn_style.copy()
         close_btn_style['width'] = 18
@@ -4633,7 +4672,7 @@ class CircuitInspector:
         
         tk.Button(btn_container, text="Cancel", command=dlg.destroy, 
                  bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-
+    
         dlg.wait_window()
 
     def save_recent_project(self):
@@ -5293,3 +5332,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
