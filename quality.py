@@ -19,10 +19,12 @@ import shlex
 from difflib import SequenceMatcher
 from handover_database import HandoverDB
 from database_manager import DatabaseManager
+from tkinter import ttk
 import pytesseract
 import os
 import cv2
-
+import io
+import re
 
 TESSERACT_PATH = r"C:\Users\E1547548\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
@@ -1505,7 +1507,7 @@ class CircuitInspector:
                     custom_category,
                     None
                 )
-                self.sync_manager_stats_only()
+                
             except Exception as e:
                 print(f"Manager category logging failed: {e}")
 
@@ -2367,7 +2369,7 @@ class CircuitInspector:
         status_bar = tk.Frame(self.root, bg='#334155', height=40)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        instructions_text = "🖍️ Highlighter: Auto-Straighten ON | ✏️ Pen: Freehand | 🅰️ Text | Esc: Deactivate | Ctrl+Z: Undo"
+        instructions_text = " Esc: Deactivate | Ctrl+Z: Undo"
         tk.Label(status_bar, text=instructions_text, bg='#334155', fg='#e2e8f0',
                 font=('Segoe UI', 9), pady=10).pack()
 
@@ -2750,59 +2752,155 @@ class CircuitInspector:
         target_row, target_col = self._resolve_merged_target(ws, int(row), col_idx)
         return ws.cell(row=target_row, column=target_col).value
 
-    def update_interphase_status_for_ref(self, ref_no, status='NOK'):
-        """Update Interphase status"""
-        try:
-            wb = load_workbook(self.excel_file)
-            if self.interphase_sheet_name not in wb.sheetnames:
-                wb.close()
-                return False
-            ws = wb[self.interphase_sheet_name]
-            
-            updated_any = False
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            
-            try:
-                username = os.getlogin()
-            except:
-                username = getpass.getuser()
-            
-            for r in range(1, ws.max_row + 1):
-                cell_val = self.read_cell(ws, r, self.interphase_cols['ref_no'])
-                if cell_val and str(cell_val).strip() == str(ref_no).strip():
-                    self.write_cell(ws, r, self.interphase_cols['status'], status)
-                    self.write_cell(ws, r, self.interphase_cols['name'], username)
-                    self.write_cell(ws, r, self.interphase_cols['date'], current_date)
-                    updated_any = True
-            
-            if updated_any:
-                wb.save(self.excel_file)
-            wb.close()
-            return updated_any
-        except Exception as e:
-            print(f"Interphase update error: {e}")
-            return False
 
-    # Placeholder methods - implement from original code
+    
+    def extract_text_from_pdf_page(self, pdf_path, page_number):
+        """Extract text from a specific page using OCR"""
+        try:
+            doc = fitz.open(pdf_path)
+            if page_number >= len(doc):
+                return ""
+            
+            page = doc[page_number]
+            
+            # Convert page to image
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better OCR
+            img_data = pix.tobytes("png")
+            img = Image.open(io.BytesIO(img_data))
+            
+            # Perform OCR
+            text = pytesseract.image_to_string(img)
+            doc.close()
+            
+            return text
+        except Exception as e:
+            print(f"OCR Error: {e}")
+            return ""
+
+    def extract_cabinet_number(self, text):
+        """Extract cabinet number from text"""
+        # Try multiple patterns to find cabinet number
+        patterns = [
+            # Match "CABINET NUMBER :-" followed by value (possibly on next line)
+            r'CABINET\s+NUMBER\s*:-\s*\n?\s*([A-Z0-9][A-Z0-9-]*)',
+            # Match "Cabinet Number :-" followed by value
+            r'Cabinet\s+Number\s*:-\s*\n?\s*([A-Z0-9][A-Z0-9-]*)',
+            # Match "Cabinet Number -:" followed by value
+            r'Cabinet\s+Number\s*[-:]+\s*\n?\s*([A-Z0-9][A-Z0-9-]*)',
+            # Match "Cabinet Number:" with value
+            r'Cabinet\s+Number\s*:\s*\n?\s*([A-Z0-9][A-Z0-9-]*)',
+            # Match "Cabinet Number" followed by value
+            r'Cabinet\s+Number\s+([A-Z0-9][A-Z0-9-]*)',
+            # Match "Cabinet #" with value
+            r'Cabinet\s*#\s*\n?\s*([A-Z0-9][A-Z0-9-]*)',
+            # Match "Cabinet ID" with value
+            r'Cabinet\s+ID\s*[-:]?\s*\n?\s*([A-Z0-9][A-Z0-9-]*)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                cabinet_num = match.group(1).strip()
+                # Ignore if it's just a dash or empty
+                if cabinet_num and cabinet_num != '-' and len(cabinet_num) > 1:
+                    print(f"Found Cabinet Number: {cabinet_num}")
+                    return cabinet_num
+        
+        # Alternative: Look for the line after "Cabinet Number" or "CABINET NUMBER"
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            if re.search(r'CABINET\s+NUMBER|Cabinet\s+Number', line, re.IGNORECASE):
+                # Check current line for value after ":-" or similar delimiters
+                parts = re.split(r':-|[-:]', line)
+                if len(parts) > 1:
+                    value = parts[-1].strip()
+                    if value and len(value) > 1 and value != '-':
+                        print(f"Found Cabinet Number (same line): {value}")
+                        return value
+                # Check next line
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    if next_line and len(next_line) > 1 and next_line != '-':
+                        print(f"Found Cabinet Number (next line): {next_line}")
+                        return next_line
+        
+        print("No Cabinet Number found in text")
+        return ""
+
+
+    def extract_project_names(self, text):
+        """Extract all potential project names from text"""
+        # Split text into lines and clean them
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        
+        # Filter out very short lines and common headers
+        excluded_words = ['page', 'cabinet', 'number', 'date', 'project', 'name', 'description']
+        project_names = []
+        
+        for line in lines:
+            # Skip lines that are too short or too long
+            if len(line) < 3 or len(line) > 100:
+                continue
+            # Skip lines that contain only numbers or special characters
+            if not any(c.isalpha() for c in line):
+                continue
+            # Skip lines with common excluded words as the only content
+            if line.lower() in excluded_words:
+                continue
+            
+            project_names.append(line)
+        
+        return project_names
+
     def ask_project_details(self):
-        """Ask for project details including storage location"""
+        """Ask for project details including storage location with OCR auto-fill"""
+        
+        # Extract OCR data from third page (index 2) if PDF is loaded
+        ocr_text = ""
+        cabinet_from_ocr = ""
+        project_names_from_ocr = []
+        
+        if hasattr(self, 'current_pdf_path') and self.current_pdf_path:
+            ocr_text = self.extract_text_from_pdf_page(self.current_pdf_path, 2)  # Page 3 (index 2)
+            cabinet_from_ocr = self.extract_cabinet_number(ocr_text)
+            project_names_from_ocr = self.extract_project_names(ocr_text)
+        
         dlg = tk.Toplevel(self.root)
         dlg.title("Project Details")
-        dlg.geometry("500x380")
+        dlg.geometry("500x400")
         dlg.transient(self.root)
         dlg.grab_set()
 
+        # Cabinet ID
         tk.Label(dlg, text="Cabinet ID", font=('Segoe UI', 10, 'bold')).pack(anchor="w", padx=20, pady=(15, 0))
-        cabinet_var = tk.StringVar(value=getattr(self, "cabinet_id", ""))
-        tk.Entry(dlg, textvariable=cabinet_var, font=('Segoe UI', 10)).pack(fill="x", padx=20)
+        cabinet_var = tk.StringVar(value=cabinet_from_ocr or getattr(self, "cabinet_id", ""))
+        cabinet_entry = tk.Entry(dlg, textvariable=cabinet_var, font=('Segoe UI', 10))
+        cabinet_entry.pack(fill="x", padx=20)
+        
+        # Highlight if auto-filled
+        if cabinet_from_ocr:
+            cabinet_entry.config(bg='#dcfce7')  # Light green
+            dlg.after(2000, lambda: cabinet_entry.config(bg='white'))
 
+        # Project Name (Dropdown/Combobox)
         tk.Label(dlg, text="Project Name", font=('Segoe UI', 10, 'bold')).pack(anchor="w", padx=20, pady=(10, 0))
-        project_var = tk.StringVar(value=self.project_name)
-        project_entry = tk.Entry(dlg, textvariable=project_var, font=('Segoe UI', 10))
-        project_entry.pack(fill="x", padx=20)
+        
+        project_var = tk.StringVar(value=getattr(self, 'project_name', ''))
+        
+        # Use Combobox for dropdown
+        project_combo = ttk.Combobox(dlg, textvariable=project_var, font=('Segoe UI', 10))
+        project_combo['values'] = project_names_from_ocr if project_names_from_ocr else []
+        project_combo.pack(fill="x", padx=20)
+        
+        # Auto-select first item if available and no existing value
+        if project_names_from_ocr and not project_var.get():
+            project_combo.current(0)
+            project_combo.config(background='#dcfce7')  # Light green
+            dlg.after(2000, lambda: project_combo.config(background='white'))
 
+        # Sales Order Number
         tk.Label(dlg, text="Sales Order Number", font=('Segoe UI', 10, 'bold')).pack(anchor="w", padx=20, pady=(10, 0))
-        so_var = tk.StringVar(value=self.sales_order_no)
+        so_var = tk.StringVar(value=getattr(self, 'sales_order_no', ''))
         tk.Entry(dlg, textvariable=so_var, font=('Segoe UI', 10)).pack(fill="x", padx=20)
 
         # Storage Location Frame
@@ -2911,7 +3009,9 @@ class CircuitInspector:
         tk.Button(dlg, text="OK", command=on_ok, 
                  bg="#10b981", fg="white", font=('Segoe UI', 10, 'bold'),
                  relief=tk.FLAT, padx=30, pady=10).pack(pady=20)
+        
         dlg.wait_window()
+    
 
     def write_project_details_to_excel(self):
         if not self.excel_file or not os.path.exists(self.excel_file):
@@ -3998,8 +4098,9 @@ class CircuitInspector:
                 ws = wb[self.punch_sheet_name]
     
                 self.write_cell(ws, p['row'], self.punch_cols['closed_name'], name)
+                # Updated to include timestamp + date
                 self.write_cell(ws, p['row'], self.punch_cols['closed_date'], 
-                              datetime.now().strftime("%Y-%m-%d"))
+                              datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     
                 wb.save(self.excel_file)
                 wb.close()
@@ -4030,7 +4131,7 @@ class CircuitInspector:
                 
                 # Store closure information
                 ann['closed_by'] = name
-                ann['closed_date'] = datetime.now().strftime("%Y-%m-%d")
+                ann['closed_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             else:
                 print(f"⚠️ Warning: No annotation found for SR {p['sr_no']}")
     
@@ -4095,6 +4196,306 @@ class CircuitInspector:
                  bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
     
         dlg.wait_window()
+
+
+    def punch_closing_mode_for_verification(self, item_data):
+            """Punch closing mode specifically for verification workflow - Converts orange to green"""
+            
+            punches = self.read_open_punches_from_excel()
+            
+            if not punches:
+                # All closed, proceed to finalization
+                self.finalize_verification(item_data)
+                return
+            
+            punches.sort(key=lambda p: (not p['implemented'], p['sr_no']))
+            
+            # Dialog
+            dlg = tk.Toplevel(self.root)
+            dlg.title("Punch Verification Mode")
+            dlg.geometry("950x650")
+            dlg.configure(bg='#f8fafc')
+            dlg.transient(self.root)
+            dlg.grab_set()
+            
+            # Header
+            header_frame = tk.Frame(dlg, bg='#7c3aed', height=50)
+            header_frame.pack(fill=tk.X)
+            header_frame.pack_propagate(False)
+            
+            tk.Label(header_frame, text="✓ Punch Verification Mode", 
+                    bg='#7c3aed', fg='white', 
+                    font=('Segoe UI', 13, 'bold')).pack(pady=12)
+            
+            # Progress
+            progress_frame = tk.Frame(dlg, bg='#f8fafc')
+            progress_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
+            
+            idx_label = tk.Label(progress_frame, text="", font=('Segoe UI', 10, 'bold'),
+                                bg='#f8fafc', fg='#1e293b')
+            idx_label.pack()
+            
+            # Info cards
+            info_frame = tk.Frame(dlg, bg='#f8fafc')
+            info_frame.pack(fill=tk.X, padx=20, pady=8)
+            
+            sr_card = tk.Frame(info_frame, bg='#dbeafe', relief=tk.FLAT)
+            sr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+            
+            tk.Label(sr_card, text="SR No.", font=('Segoe UI', 8), 
+                    bg='#dbeafe', fg='#1e40af').pack(anchor='w', padx=10, pady=(6, 2))
+            sr_label = tk.Label(sr_card, text="", font=('Segoe UI', 12, 'bold'),
+                               bg='#dbeafe', fg='#1e293b')
+            sr_label.pack(anchor='w', padx=10, pady=(0, 6))
+            
+            ref_card = tk.Frame(info_frame, bg='#e0e7ff', relief=tk.FLAT)
+            ref_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+            
+            tk.Label(ref_card, text="Reference", font=('Segoe UI', 8), 
+                    bg='#e0e7ff', fg='#4338ca').pack(anchor='w', padx=10, pady=(6, 2))
+            ref_label = tk.Label(ref_card, text="", font=('Segoe UI', 12, 'bold'),
+                                bg='#e0e7ff', fg='#1e293b')
+            ref_label.pack(anchor='w', padx=10, pady=(0, 6))
+            
+            status_card = tk.Frame(info_frame, bg='#fef3c7', relief=tk.FLAT)
+            status_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+            
+            tk.Label(status_card, text="Status", font=('Segoe UI', 8), 
+                    bg='#fef3c7', fg='#92400e').pack(anchor='w', padx=10, pady=(6, 2))
+            impl_label = tk.Label(status_card, text="", font=('Segoe UI', 12, 'bold'),
+                                 bg='#fef3c7', fg='#1e293b')
+            impl_label.pack(anchor='w', padx=10, pady=(0, 6))
+            
+            # Content
+            content_frame = tk.Frame(dlg, bg='white', relief=tk.FLAT)
+            content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=8)
+            
+            tk.Label(content_frame, text="Punch Description:", font=('Segoe UI', 9, 'bold'),
+                    bg='white', fg='#64748b', anchor='w').pack(fill=tk.X, padx=15, pady=(8, 3))
+            
+            text_widget = tk.Text(content_frame, wrap=tk.WORD, height=9,
+                                 font=('Segoe UI', 10), bg='#f8fafc',
+                                 relief=tk.FLAT, padx=10, pady=8)
+            text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
+            text_widget.config(state=tk.DISABLED)
+        
+            pos = [0]
+        
+            def show_item():
+                p = punches[pos[0]]
+                
+                progress_text = f"Item {pos[0]+1} of {len(punches)}"
+                progress_pct = f"({int((pos[0]+1)/len(punches)*100)}% complete)"
+                idx_label.config(text=f"{progress_text} {progress_pct}")
+                
+                sr_label.config(text=str(p['sr_no']))
+                ref_label.config(text=str(p['ref_no']))
+                
+                impl_status = "✓ Implemented" if p['implemented'] else "⚠ Not Implemented"
+                impl_color = '#10b981' if p['implemented'] else '#f59e0b'
+                impl_label.config(text=impl_status, fg=impl_color)
+                
+                text_widget.config(state=tk.NORMAL)
+                text_widget.delete("1.0", tk.END)
+                text_widget.insert(tk.END, p['punch_text'])
+                text_widget.insert(tk.END, f"\n\n──────────────────\n")
+                text_widget.insert(tk.END, f"Category: {p['category']}\n")
+        
+                # Find annotation - checks for both SR number and excel row
+                ann = next((a for a in self.annotations 
+                           if a.get('sr_no') == p['sr_no'] 
+                           or (a.get('excel_row') == p['row'])), None)
+                
+                if ann and ann.get('quality_remark'):
+                    text_widget.insert(tk.END, f"\n──────────────────\n")
+                    text_widget.insert(tk.END, "Quality Remarks:\n")
+                    text_widget.insert(tk.END, ann['quality_remark'])
+                
+                text_widget.config(state=tk.DISABLED)
+        
+            show_item()
+        
+            def add_remark():
+                """Add quality-side remark to push cabinet back to production"""
+                p = punches[pos[0]]
+                
+                # Find annotation
+                ann = next((a for a in self.annotations 
+                           if a.get('sr_no') == p['sr_no'] 
+                           or (a.get('excel_row') == p['row'])), None)
+                
+                current_remark = ann.get('quality_remark', '') if ann else ''
+                
+                remark = simpledialog.askstring(
+                    "Add Quality Remark", 
+                    f"Enter quality remark for SR {p['sr_no']}:\n(This will be sent back to production)",
+                    initialvalue=current_remark,
+                    parent=dlg
+                )
+                
+                if remark is not None:  # Allow empty string to clear remark
+                    if ann:
+                        ann['quality_remark'] = remark
+                        messagebox.showinfo("Success", "Quality remark added successfully!")
+                        show_item()  # Refresh display
+                    else:
+                        messagebox.showwarning("Warning", "No annotation found for this punch item.")
+        
+            def close_punch():
+                p = punches[pos[0]]
+        
+                try:
+                    default_user = os.getlogin()
+                except:
+                    default_user = getpass.getuser()
+        
+                name = simpledialog.askstring("Closed By", 
+                                             "Enter your name to close this punch:", 
+                                             initialvalue=default_user, 
+                                             parent=dlg)
+                if not name:
+                    return
+        
+                try:
+                    wb = load_workbook(self.excel_file)
+                    ws = wb[self.punch_sheet_name]
+        
+                    self.write_cell(ws, p['row'], self.punch_cols['closed_name'], name)
+                    # Updated to include timestamp + date
+                    self.write_cell(ws, p['row'], self.punch_cols['closed_date'], 
+                                  datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        
+                    wb.save(self.excel_file)
+                    wb.close()
+        
+                except PermissionError:
+                    messagebox.showerror("File Locked", 
+                                       "⚠️ Please close the Excel file and try again.")
+                    return
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to close punch:\n{e}")
+                    return
+        
+                # Find and convert annotation color from orange to green
+                ann = next((a for a in self.annotations 
+                           if a.get('sr_no') == p['sr_no'] 
+                           or (a.get('excel_row') == p['row'])), None)
+                
+                if ann:
+                    # Convert orange highlight to green (KEEP the annotation)
+                    if ann.get('type') == 'highlight' and ann.get('color') == 'orange':
+                        ann['color'] = 'green'  # Change from error to OK
+                        print(f"✓ Verification: Converted annotation to green for SR {p['sr_no']}")
+                    
+                    # Also handle old rectangle-style error annotations
+                    elif ann.get('type') == 'error':
+                        ann['type'] = 'ok'  # Convert error rectangle to OK
+                        print(f"✓ Verification: Converted error rectangle to OK for SR {p['sr_no']}")
+                    
+                    # Store closure information
+                    ann['closed_by'] = name
+                    ann['closed_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    print(f"⚠️ Warning: No annotation found for SR {p['sr_no']} (Row {p['row']})")
+        
+                # Refresh display to show green highlight
+                self.display_page()
+                
+                # Update stats after closing
+                self.sync_manager_stats_only()
+        
+                if pos[0] < len(punches) - 1:
+                    pos[0] += 1
+                    show_item()
+                else:
+                    messagebox.showinfo("All Punches Closed", 
+                                      f"✓ All punches verified and closed!\n{len(punches)} items processed.",
+                                      icon='info')
+                    dlg.destroy()
+                    # Proceed to finalization
+                    self.finalize_verification(item_data)
+        
+            def next_item():
+                if pos[0] < len(punches) - 1:
+                    pos[0] += 1
+                    show_item()
+        
+            def prev_item():
+                if pos[0] > 0:
+                    pos[0] -= 1
+                    show_item()
+        
+            # Buttons
+            btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)
+            btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))
+            btn_frame.pack_propagate(False)
+            
+            btn_container = tk.Frame(btn_frame, bg='#f8fafc')
+            btn_container.pack(expand=True)
+            
+            btn_style = {
+                'font': ('Segoe UI', 12, 'bold'),
+                'relief': tk.FLAT,
+                'borderwidth': 0,
+                'cursor': 'hand2',
+                'padx': 35,
+                'pady': 18,
+                'width': 15
+            }
+        
+            tk.Button(btn_container, text="◀  Previous", command=prev_item, 
+                     bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+            
+            tk.Button(btn_container, text="📝 Add Remark", command=add_remark, 
+                     bg='#3b82f6', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+            
+            close_btn_style = btn_style.copy()
+            close_btn_style['width'] = 18
+            tk.Button(btn_container, text="✓  CLOSE PUNCH", command=close_punch, 
+                     bg='#10b981', fg='white', **close_btn_style).pack(side=tk.LEFT, padx=8)
+            
+            tk.Button(btn_container, text="Next  ▶", command=next_item, 
+                     bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+            
+            tk.Button(btn_container, text="Cancel", command=dlg.destroy, 
+                     bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+        
+            dlg.wait_window()
+
+
+    def update_interphase_status_for_ref(self, ref_no, status='NOK'):
+            """Update Interphase status"""
+            try:
+                wb = load_workbook(self.excel_file)
+                if self.interphase_sheet_name not in wb.sheetnames:
+                    wb.close()
+                    return False
+                ws = wb[self.interphase_sheet_name]
+                
+                updated_any = False
+                # Updated to include timestamp + date
+                current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                try:
+                    username = os.getlogin()
+                except:
+                    username = getpass.getuser()
+                
+                for r in range(1, ws.max_row + 1):
+                    cell_val = self.read_cell(ws, r, self.interphase_cols['ref_no'])
+                    if cell_val and str(cell_val).strip() == str(ref_no).strip():
+                        self.write_cell(ws, r, self.interphase_cols['status'], status)
+                        self.write_cell(ws, r, self.interphase_cols['name'], username)
+                        self.write_cell(ws, r, self.interphase_cols['date'], current_date)
+                        updated_any = True
+                
+                if updated_any:
+                    wb.save(self.excel_file)
+                wb.close()
+                return updated_any
+            except Exception as e:
+                print(f"Interphase update error: {e}")
+                return False
 
     # ============================================================================
     # NEW: finalize_verification - Check checklist, save Excel, export PDF
@@ -4418,268 +4819,7 @@ class CircuitInspector:
         except Exception as e:
             print(f"Error counting open punches: {e}")
             return 0
-    def punch_closing_mode_for_verification(self, item_data):
-        """Punch closing mode specifically for verification workflow - Converts orange to green"""
-        
-        punches = self.read_open_punches_from_excel()
-        
-        if not punches:
-            # All closed, proceed to finalization
-            self.finalize_verification(item_data)
-            return
-        
-        punches.sort(key=lambda p: (not p['implemented'], p['sr_no']))
-        
-        # Dialog
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Punch Verification Mode")
-        dlg.geometry("950x650")
-        dlg.configure(bg='#f8fafc')
-        dlg.transient(self.root)
-        dlg.grab_set()
-        
-        # Header
-        header_frame = tk.Frame(dlg, bg='#7c3aed', height=50)
-        header_frame.pack(fill=tk.X)
-        header_frame.pack_propagate(False)
-        
-        tk.Label(header_frame, text="✓ Punch Verification Mode", 
-                bg='#7c3aed', fg='white', 
-                font=('Segoe UI', 13, 'bold')).pack(pady=12)
-        
-        # Progress
-        progress_frame = tk.Frame(dlg, bg='#f8fafc')
-        progress_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
-        
-        idx_label = tk.Label(progress_frame, text="", font=('Segoe UI', 10, 'bold'),
-                            bg='#f8fafc', fg='#1e293b')
-        idx_label.pack()
-        
-        # Info cards
-        info_frame = tk.Frame(dlg, bg='#f8fafc')
-        info_frame.pack(fill=tk.X, padx=20, pady=8)
-        
-        sr_card = tk.Frame(info_frame, bg='#dbeafe', relief=tk.FLAT)
-        sr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        
-        tk.Label(sr_card, text="SR No.", font=('Segoe UI', 8), 
-                bg='#dbeafe', fg='#1e40af').pack(anchor='w', padx=10, pady=(6, 2))
-        sr_label = tk.Label(sr_card, text="", font=('Segoe UI', 12, 'bold'),
-                           bg='#dbeafe', fg='#1e293b')
-        sr_label.pack(anchor='w', padx=10, pady=(0, 6))
-        
-        ref_card = tk.Frame(info_frame, bg='#e0e7ff', relief=tk.FLAT)
-        ref_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        
-        tk.Label(ref_card, text="Reference", font=('Segoe UI', 8), 
-                bg='#e0e7ff', fg='#4338ca').pack(anchor='w', padx=10, pady=(6, 2))
-        ref_label = tk.Label(ref_card, text="", font=('Segoe UI', 12, 'bold'),
-                            bg='#e0e7ff', fg='#1e293b')
-        ref_label.pack(anchor='w', padx=10, pady=(0, 6))
-        
-        status_card = tk.Frame(info_frame, bg='#fef3c7', relief=tk.FLAT)
-        status_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
-        
-        tk.Label(status_card, text="Status", font=('Segoe UI', 8), 
-                bg='#fef3c7', fg='#92400e').pack(anchor='w', padx=10, pady=(6, 2))
-        impl_label = tk.Label(status_card, text="", font=('Segoe UI', 12, 'bold'),
-                             bg='#fef3c7', fg='#1e293b')
-        impl_label.pack(anchor='w', padx=10, pady=(0, 6))
-        
-        # Content
-        content_frame = tk.Frame(dlg, bg='white', relief=tk.FLAT)
-        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=8)
-        
-        tk.Label(content_frame, text="Punch Description:", font=('Segoe UI', 9, 'bold'),
-                bg='white', fg='#64748b', anchor='w').pack(fill=tk.X, padx=15, pady=(8, 3))
-        
-        text_widget = tk.Text(content_frame, wrap=tk.WORD, height=9,
-                             font=('Segoe UI', 10), bg='#f8fafc',
-                             relief=tk.FLAT, padx=10, pady=8)
-        text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
-        text_widget.config(state=tk.DISABLED)
     
-        pos = [0]
-    
-        def show_item():
-            p = punches[pos[0]]
-            
-            progress_text = f"Item {pos[0]+1} of {len(punches)}"
-            progress_pct = f"({int((pos[0]+1)/len(punches)*100)}% complete)"
-            idx_label.config(text=f"{progress_text} {progress_pct}")
-            
-            sr_label.config(text=str(p['sr_no']))
-            ref_label.config(text=str(p['ref_no']))
-            
-            impl_status = "✓ Implemented" if p['implemented'] else "⚠ Not Implemented"
-            impl_color = '#10b981' if p['implemented'] else '#f59e0b'
-            impl_label.config(text=impl_status, fg=impl_color)
-            
-            text_widget.config(state=tk.NORMAL)
-            text_widget.delete("1.0", tk.END)
-            text_widget.insert(tk.END, p['punch_text'])
-            text_widget.insert(tk.END, f"\n\n──────────────────\n")
-            text_widget.insert(tk.END, f"Category: {p['category']}\n")
-    
-            # Find annotation - checks for both SR number and excel row
-            ann = next((a for a in self.annotations 
-                       if a.get('sr_no') == p['sr_no'] 
-                       or (a.get('excel_row') == p['row'])), None)
-            
-            if ann and ann.get('quality_remark'):
-                text_widget.insert(tk.END, f"\n──────────────────\n")
-                text_widget.insert(tk.END, "Quality Remarks:\n")
-                text_widget.insert(tk.END, ann['quality_remark'])
-            
-            text_widget.config(state=tk.DISABLED)
-    
-        show_item()
-    
-        def add_remark():
-            """Add quality-side remark to push cabinet back to production"""
-            p = punches[pos[0]]
-            
-            # Find annotation
-            ann = next((a for a in self.annotations 
-                       if a.get('sr_no') == p['sr_no'] 
-                       or (a.get('excel_row') == p['row'])), None)
-            
-            current_remark = ann.get('quality_remark', '') if ann else ''
-            
-            remark = simpledialog.askstring(
-                "Add Quality Remark", 
-                f"Enter quality remark for SR {p['sr_no']}:\n(This will be sent back to production)",
-                initialvalue=current_remark,
-                parent=dlg
-            )
-            
-            if remark is not None:  # Allow empty string to clear remark
-                if ann:
-                    ann['quality_remark'] = remark
-                    messagebox.showinfo("Success", "Quality remark added successfully!")
-                    show_item()  # Refresh display
-                else:
-                    messagebox.showwarning("Warning", "No annotation found for this punch item.")
-    
-        def close_punch():
-            p = punches[pos[0]]
-    
-            try:
-                default_user = os.getlogin()
-            except:
-                default_user = getpass.getuser()
-    
-            name = simpledialog.askstring("Closed By", 
-                                         "Enter your name to close this punch:", 
-                                         initialvalue=default_user, 
-                                         parent=dlg)
-            if not name:
-                return
-    
-            try:
-                wb = load_workbook(self.excel_file)
-                ws = wb[self.punch_sheet_name]
-    
-                self.write_cell(ws, p['row'], self.punch_cols['closed_name'], name)
-                self.write_cell(ws, p['row'], self.punch_cols['closed_date'], 
-                              datetime.now().strftime("%Y-%m-%d"))
-    
-                wb.save(self.excel_file)
-                wb.close()
-    
-            except PermissionError:
-                messagebox.showerror("File Locked", 
-                                   "⚠️ Please close the Excel file and try again.")
-                return
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to close punch:\n{e}")
-                return
-    
-            # Find and convert annotation color from orange to green
-            ann = next((a for a in self.annotations 
-                       if a.get('sr_no') == p['sr_no'] 
-                       or (a.get('excel_row') == p['row'])), None)
-            
-            if ann:
-                # Convert orange highlight to green (KEEP the annotation)
-                if ann.get('type') == 'highlight' and ann.get('color') == 'orange':
-                    ann['color'] = 'green'  # Change from error to OK
-                    print(f"✓ Verification: Converted annotation to green for SR {p['sr_no']}")
-                
-                # Also handle old rectangle-style error annotations
-                elif ann.get('type') == 'error':
-                    ann['type'] = 'ok'  # Convert error rectangle to OK
-                    print(f"✓ Verification: Converted error rectangle to OK for SR {p['sr_no']}")
-                
-                # Store closure information
-                ann['closed_by'] = name
-                ann['closed_date'] = datetime.now().strftime("%Y-%m-%d")
-            else:
-                print(f"⚠️ Warning: No annotation found for SR {p['sr_no']} (Row {p['row']})")
-    
-            # Refresh display to show green highlight
-            self.display_page()
-            
-            # Update stats after closing
-            self.sync_manager_stats_only()
-    
-            if pos[0] < len(punches) - 1:
-                pos[0] += 1
-                show_item()
-            else:
-                messagebox.showinfo("All Punches Closed", 
-                                  f"✓ All punches verified and closed!\n{len(punches)} items processed.",
-                                  icon='info')
-                dlg.destroy()
-                # Proceed to finalization
-                self.finalize_verification(item_data)
-    
-        def next_item():
-            if pos[0] < len(punches) - 1:
-                pos[0] += 1
-                show_item()
-    
-        def prev_item():
-            if pos[0] > 0:
-                pos[0] -= 1
-                show_item()
-    
-        # Buttons
-        btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)
-        btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))
-        btn_frame.pack_propagate(False)
-        
-        btn_container = tk.Frame(btn_frame, bg='#f8fafc')
-        btn_container.pack(expand=True)
-        
-        btn_style = {
-            'font': ('Segoe UI', 12, 'bold'),
-            'relief': tk.FLAT,
-            'borderwidth': 0,
-            'cursor': 'hand2',
-            'padx': 35,
-            'pady': 18,
-            'width': 15
-        }
-    
-        tk.Button(btn_container, text="◀  Previous", command=prev_item, 
-                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-        
-        tk.Button(btn_container, text="📝 Add Remark", command=add_remark, 
-                 bg='#3b82f6', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-        
-        close_btn_style = btn_style.copy()
-        close_btn_style['width'] = 18
-        tk.Button(btn_container, text="✓  CLOSE PUNCH", command=close_punch, 
-                 bg='#10b981', fg='white', **close_btn_style).pack(side=tk.LEFT, padx=8)
-        
-        tk.Button(btn_container, text="Next  ▶", command=next_item, 
-                 bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-        
-        tk.Button(btn_container, text="Cancel", command=dlg.destroy, 
-                 bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-    
-        dlg.wait_window()
 
     def save_recent_project(self):
         """Save current project to database with storage location - HIGHLIGHTER VERSION"""
@@ -4973,134 +5113,6 @@ class CircuitInspector:
     # COMPREHENSIVE STATUS AND STATISTICS MANAGEMENT
     # ================================================================
 
-    def get_current_status_from_db(self):
-        """Get the current status of this cabinet from manager database
-        
-        Returns the workflow status without modifying anything.
-        Safe to call anytime to check current state.
-        """
-        try:
-            conn = sqlite3.connect(self.manager_db.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT status FROM cabinets WHERE cabinet_id = ?
-            ''', (self.cabinet_id,))
-            
-            result = cursor.fetchone()
-            conn.close()
-            
-            if result:
-                return result[0]
-            else:
-                # New cabinet - default to quality_inspection
-                return 'quality_inspection'
-                
-        except Exception as e:
-            print(f"Error getting status: {e}")
-            return 'quality_inspection'  # Safe fallback
-
-
-    def update_status_and_sync(self, new_status):
-        """Update status and sync stats in one atomic operation
-        
-        This is the RECOMMENDED approach for status changes.
-        Use this when you want to change workflow status and update statistics.
-        
-        Args:
-            new_status: One of:
-                - 'quality_inspection' (initial state)
-                - 'handed_to_production' (after handover)
-                - 'in_progress' (production working on it)
-                - 'being_closed_by_quality' (quality verifying rework)
-                - 'closed' (final state)
-        
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if not self.cabinet_id:
-            print("⚠️ Cannot update status: cabinet_id not set")
-            return False
-        
-        try:
-            # Count pages with annotations
-            annotated_pages = 0
-            total_pages = 0
-            
-            if self.pdf_document:
-                annotated_pages = len(set(ann['page'] for ann in self.annotations 
-                                         if ann.get('page') is not None))
-                total_pages = len(self.pdf_document)
-            
-            # Count punches by type
-            error_anns = [a for a in self.annotations if a.get('type') == 'error']
-            total_punches = len(error_anns)
-            
-            # Count from Excel for accuracy
-            open_punches = self.count_open_punches()
-            
-            # Count implemented and closed from Excel
-            implemented_punches = 0
-            closed_punches = 0
-            
-            if self.excel_file and os.path.exists(self.excel_file):
-                try:
-                    from openpyxl import load_workbook
-                    wb = load_workbook(self.excel_file, data_only=True)
-                    ws = wb[self.punch_sheet_name] if self.punch_sheet_name in wb.sheetnames else wb.active
-                    
-                    row = 9  # Start from row 9 (matching manager code)
-                    while row <= ws.max_row + 5:
-                        # Check if this row has a punch (has checked_name)
-                        checked = self.read_cell(ws, row, self.punch_cols['checked_name'])
-                        
-                        if checked:  # This is a logged punch
-                            implemented = self.read_cell(ws, row, self.punch_cols['implemented_name'])
-                            closed = self.read_cell(ws, row, self.punch_cols['closed_name'])
-                            
-                            if closed:
-                                closed_punches += 1
-                            elif implemented:
-                                implemented_punches += 1
-                        
-                        row += 1
-                        
-                        # Safety limit
-                        if row > 2000:
-                            break
-                    
-                    wb.close()
-                except Exception as e:
-                    print(f"⚠️ Error reading Excel stats: {e}")
-            
-            # Update manager database with NEW status AND stats
-            success = self.manager_db.update_cabinet(
-                self.cabinet_id,
-                self.project_name,
-                self.sales_order_no,
-                total_pages,
-                annotated_pages,
-                total_punches,
-                open_punches,
-                implemented_punches,
-                closed_punches,
-                new_status,  # NEW STATUS
-                storage_location=getattr(self, 'storage_location', None),
-                excel_path=self.excel_file
-            )
-            
-            if success:
-                print(f"✓ Updated {self.cabinet_id}: {new_status}")
-                print(f"  Stats: {total_punches} punches ({open_punches} open, "
-                      f"{implemented_punches} implemented, {closed_punches} closed)")
-            
-            return success
-            
-        except Exception as e:
-            print(f"❌ Update status and sync error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
 
 
     def sync_manager_stats_only(self):
@@ -5190,9 +5202,7 @@ class CircuitInspector:
             else:
                 # Cabinet doesn't exist - CREATE with initial status
                 # Try to get status from Interphase worksheet first
-                initial_status = self.manager_db.get_status_from_interphase(self.excel_file)
-                if not initial_status:
-                    initial_status = 'quality_inspection'  # Default fallback
+                initial_status = self.get_status_from_interphase(self.excel_file)
                 
                 cursor.execute('''
                     INSERT INTO cabinets (
@@ -5320,7 +5330,73 @@ class CircuitInspector:
             print(f"Error counting open punches: {e}")
             return 0
 
-
+    def get_status_from_interphase(self, excel_path):
+        """Read Interphase worksheet and determine status based on reference number
+        Returns: status string or None if not determined from Interphase
+        """
+        if not excel_path or not os.path.exists(excel_path):
+            return None
+        
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(excel_path, data_only=True)
+            
+            # Check if Interphase worksheet exists
+            if 'Interphase' not in wb.sheetnames:
+                wb.close()
+                return None
+            
+            ws = wb['Interphase']
+            
+            # Find the lowest filled status cell in column D
+            lowest_status_row = None
+            lowest_ref_no = None
+            
+            # Start from row 2 (assuming row 1 is header)
+            for row in range(2, ws.max_row + 1):
+                status_cell = self.read_cell(ws, row, 'D')
+                
+                # If status cell has content, check the reference number
+                if status_cell:
+                    ref_no_cell = self.read_cell(ws, row, 'B')
+                    
+                    if ref_no_cell:
+                        lowest_status_row = row
+                        lowest_ref_no = str(ref_no_cell).strip()
+            
+            wb.close()
+            
+            # If we found a reference number, determine the status
+            if lowest_ref_no:
+                try:
+                    # Handle range formats like "1-2" or single numbers like "5"
+                    if '-' in lowest_ref_no:
+                        # Get the first number in the range
+                        ref_num = int(lowest_ref_no.split('-')[0])
+                    else:
+                        ref_num = int(lowest_ref_no)
+                    
+                    # Determine status based on reference number
+                    if 1 <= ref_num <= 2:
+                        return 'project_info_sheet'
+                    elif 3 <= ref_num <= 9:
+                        return 'mechanical_assembly'
+                    elif 10 <= ref_num <= 18:
+                        return 'component_assembly'
+                    elif 19 <= ref_num <= 26:
+                        return 'final_assembly'
+                    elif 27 <= ref_num <= 31:
+                        return 'final_documentation'
+                
+                except (ValueError, IndexError):
+                    # If we can't parse the reference number, return None
+                    pass
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error reading Interphase worksheet: {e}")
+            return None
 
 
     
@@ -5338,6 +5414,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-

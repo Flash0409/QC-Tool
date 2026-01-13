@@ -541,7 +541,7 @@ class ProductionTool:
         status_bar = tk.Frame(self.root, bg='#334155', height=40)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        instructions_text = "✏️ Pen: Freehand | 🅰️ Text: Click to add | Esc: Deactivate | Ctrl+Z: Undo"
+        instructions_text = "Pen: Freehand | Text: Click to add | Esc: Deactivate | Ctrl+Z: Undo"
         tk.Label(status_bar, text=instructions_text, bg='#334155', fg='#e2e8f0',
                 font=('Segoe UI', 9), pady=10).pack()
     
@@ -577,7 +577,7 @@ class ProductionTool:
         header_frame.pack(fill=tk.X)
         header_frame.pack_propagate(False)
         
-        tk.Label(header_frame, text="📦 Production Queue - Select Item",
+        tk.Label(header_frame, text="Production Queue - Select Item",
                 bg='#8b5cf6', fg='white',
                 font=('Segoe UI', 14, 'bold')).pack(pady=15)
         
@@ -608,7 +608,7 @@ class ProductionTool:
         
         # Populate listbox
         for item in pending_items:
-            status_icon = "⚙️" if item['status'] == 'in_progress' else "📦"
+            status_icon = " " if item['status'] == 'in_progress' else "📦"
             display = (
                 f"{status_icon} {item['cabinet_id']:20} | {item['project_name']:30} | "
                 f"Punches: {item['open_punches']:3} | By: {item['handed_over_by']:15} | "
@@ -638,7 +638,7 @@ class ProductionTool:
             'pady': 12
         }
         
-        tk.Button(btn_frame, text="📂 Load Selected", command=load_selected,
+        tk.Button(btn_frame, text="Load Selected", command=load_selected,
                  bg='#3b82f6', fg='white', **btn_style).pack(side=tk.LEFT, padx=5)
         
         tk.Button(btn_frame, text="Cancel", command=dlg.destroy,
@@ -730,17 +730,6 @@ class ProductionTool:
             
             self.display_page()
             
-            messagebox.showinfo(
-                "Item Loaded",
-                f"✓ Loaded from Production Queue:\n\n"
-                f"Cabinet: {self.cabinet_id}\n"
-                f"Project: {self.project_name}\n"
-                f"Open Punches: {item['open_punches']}\n"
-                f"Annotations: {len(self.annotations)}\n\n"
-                f"🖍️ Highlighter mode active\n"
-                f"Production Mode will open automatically...",
-                icon='info'
-            )
             
             # AUTO-OPEN PRODUCTION MODE
             self.root.after(500, self.production_mode)
@@ -947,7 +936,7 @@ class ProductionTool:
     # ================================================================
     
     def production_mode(self):
-    """Production mode with highlighter navigation"""
+        """Production mode with highlighter navigation"""
         if not self.pdf_document or not self.excel_file:
             messagebox.showwarning("No Item", 
                                  "Please load an item from the production queue first.")
@@ -1105,8 +1094,9 @@ class ProductionTool:
                 ws = wb[self.punch_sheet_name]
                 
                 self.write_cell(ws, p['row'], self.punch_cols['implemented_name'], name)
+                # Updated to include timestamp + date
                 self.write_cell(ws, p['row'], self.punch_cols['implemented_date'],
-                              datetime.now().strftime("%Y-%m-%d"))
+                              datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 
                 wb.save(self.excel_file)
                 wb.close()
@@ -2137,4 +2127,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
