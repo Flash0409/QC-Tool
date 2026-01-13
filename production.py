@@ -947,7 +947,7 @@ class ProductionTool:
     # ================================================================
     
     def production_mode(self):
-        """Production mode with highlighter navigation"""
+    """Production mode with highlighter navigation"""
         if not self.pdf_document or not self.excel_file:
             messagebox.showwarning("No Item", 
                                  "Please load an item from the production queue first.")
@@ -1058,10 +1058,21 @@ class ProductionTool:
             text_widget.insert(tk.END, f"Category: {p['category']}\n")
             text_widget.insert(tk.END, f"Implementation: {'YES' if p['implemented'] else 'NO'}\n")
             
-            ann = next((a for a in self.annotations if a.get('excel_row') == p['row']), None)
+            # Find annotation - checks for both SR number and excel row
+            ann = next((a for a in self.annotations 
+                       if a.get('sr_no') == p['sr_no'] 
+                       or a.get('excel_row') == p['row']), None)
+            
+            # Display quality remarks from quality team
+            if ann and ann.get('quality_remark'):
+                text_widget.insert(tk.END, f"\n───────────────────────\n")
+                text_widget.insert(tk.END, "📋 Quality Remarks:\n")
+                text_widget.insert(tk.END, ann['quality_remark'])
+            
+            # Display previous implementation remarks
             if ann and ann.get('implementation_remark'):
                 text_widget.insert(tk.END, f"\n───────────────────────\n")
-                text_widget.insert(tk.END, "Previous Remarks:\n")
+                text_widget.insert(tk.END, "Previous Implementation Remarks:\n")
                 text_widget.insert(tk.END, ann['implementation_remark'])
             
             text_widget.config(state=tk.DISABLED)
@@ -1111,12 +1122,17 @@ class ProductionTool:
                 messagebox.showerror("Excel Error", str(e), parent=dlg)
                 return
             
-            ann = next((a for a in self.annotations if a.get('sr_no') == p['sr_no']), None)
+            # Find annotation and update implementation status
+            ann = next((a for a in self.annotations 
+                       if a.get('sr_no') == p['sr_no'] 
+                       or a.get('excel_row') == p['row']), None)
+            
             if ann:
                 ann['implemented'] = True
                 ann['implemented_name'] = name
                 ann['implemented_date'] = datetime.now().isoformat()
-                ann['implementation_remark'] = remark
+                if remark:
+                    ann['implementation_remark'] = remark
             
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
@@ -2121,3 +2137,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
