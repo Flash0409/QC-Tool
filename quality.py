@@ -1259,7 +1259,9 @@ class CircuitInspector:
                 uname = getpass.getuser()
 
             self.write_cell(ws, row_num, self.punch_cols['checked_name'], uname)
-            self.write_cell(ws, row_num, self.punch_cols['checked_date'], datetime.now().strftime("%Y-%m-%d"))
+            # Updated to include timestamp + date
+            self.write_cell(ws, row_num, self.punch_cols['checked_date'], 
+                          datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
             wb.save(self.excel_file)
             wb.close()
@@ -1361,7 +1363,9 @@ class CircuitInspector:
                 uname = getpass.getuser()
 
             self.write_cell(ws, row_num, self.punch_cols['checked_name'], uname)
-            self.write_cell(ws, row_num, self.punch_cols['checked_date'], datetime.now().strftime("%Y-%m-%d"))
+            # Updated to include timestamp + date
+            self.write_cell(ws, row_num, self.punch_cols['checked_date'], 
+                          datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
             wb.save(self.excel_file)
             wb.close()
@@ -1472,7 +1476,9 @@ class CircuitInspector:
                 uname = getpass.getuser()
 
             self.write_cell(ws, row_num, self.punch_cols['checked_name'], uname)
-            self.write_cell(ws, row_num, self.punch_cols['checked_date'], datetime.now().strftime("%Y-%m-%d"))
+            # Updated to include timestamp + date
+            self.write_cell(ws, row_num, self.punch_cols['checked_date'], 
+                          datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
             wb.save(self.excel_file)
             wb.close()
@@ -5332,4 +5338,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
