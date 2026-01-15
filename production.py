@@ -19,6 +19,12 @@ import sqlite3
 import numpy as np
 from handover_database import HandoverDB
 from database_manager import DatabaseManager
+import sys
+
+LOGGED_IN_USERNAME = sys.argv[1] if len(sys.argv) > 1 else None
+LOGGED_IN_FULLNAME = sys.argv[2] if len(sys.argv) > 2 else None
+
+print(f"✓ Production Tool started by: {LOGGED_IN_FULLNAME} (username: {LOGGED_IN_USERNAME})")
 
 
 def get_app_base_dir():
@@ -136,6 +142,8 @@ class ManagerDB:
 class ProductionTool:
     def __init__(self, root):
         self.root = root
+        self.logged_in_username = LOGGED_IN_USERNAME
+        self.logged_in_fullname = LOGGED_IN_FULLNAME
         self.root.title("Production Tool - Highlighter Mode")
         self.root.geometry("1400x900")
         
@@ -713,10 +721,7 @@ class ProductionTool:
             print(f"{'='*60}\n")
             
             # Mark as in progress
-            try:
-                username = os.getlogin()
-            except:
-                username = getpass.getuser()
+            username = self.logged_in_fullname or "Unknown User"
             
             self.handover_db.update_production_status(
                 item['cabinet_id'],
@@ -770,19 +775,9 @@ class ProductionTool:
         except Exception as e:
             print(f"⚠️ Session auto-save failed: {e}")
             # Continue anyway - not critical
+        remarks=None
         
-        # Get remarks
-        remarks = simpledialog.askstring(
-            "Production Remarks",
-            "Enter any remarks or notes for Quality team:\n\n"
-            "(Optional - Leave blank if none)",
-            parent=self.root
-        )
-        
-        try:
-            username = os.getlogin()
-        except:
-            username = getpass.getuser()
+        username = self.logged_in_fullname or "Unknown User"
         
         handback_data = {
             "cabinet_id": self.cabinet_id,
@@ -1073,15 +1068,9 @@ class ProductionTool:
         def mark_implemented():
             p = punches[pos[0]]
             
-            try:
-                default_user = os.getlogin()
-            except:
-                default_user = getpass.getuser()
+            default_user = self.logged_in_fullname or "Unknown User"
             
-            name = simpledialog.askstring("Implemented By",
-                                        "Enter your name:",
-                                        initialvalue=default_user,
-                                        parent=dlg)
+            name = default_user
             if not name:
                 return
             

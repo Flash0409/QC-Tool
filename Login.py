@@ -3,6 +3,7 @@ from tkinter import ttk, messagebox
 import os, sys, json
 from datetime import datetime
 import subprocess
+from PIL import Image, ImageTk
 
 # ====================================================== 
 # APP BASE DIR (Portable)
@@ -13,50 +14,59 @@ def get_app_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 BASE_DIR = get_app_base_dir()
-CRED_FILE = os.path.join(BASE_DIR, "assets", "credentials.json")
+# Assets folder is one level up from current folder
+ASSETS_DIR = os.path.join(os.path.dirname(BASE_DIR), "assets")
+CRED_FILE = os.path.join(ASSETS_DIR, "credentials.json")
 
 # ====================================================== 
 # CREDENTIAL HELPERS
 # ====================================================== 
 def load_credentials():
+    """Load user credentials from assets/credentials.json"""
     if not os.path.exists(CRED_FILE):
-        os.makedirs(os.path.dirname(CRED_FILE), exist_ok=True)
+        os.makedirs(ASSETS_DIR, exist_ok=True)
         default_creds = {
             "users": {
-                "admin": {"password": "admin123", "role": "Admin"},
-                "manager1": {"password": "mgr@2024", "role": "Manager"},
-                "quality1": {"password": "qc@2024", "role": "Quality"},
-                "prod1": {"password": "prod@2024", "role": "Production"}
+                "admin": {"password": "admin123", "role": "Admin", "full_name": "Administrator"},
+                "manager1": {"password": "mgr@2024", "role": "Manager", "full_name": "Manager User"},
+                "quality1": {"password": "qc@2024", "role": "Quality", "full_name": "Kshitij Palshikar"},
+                "prod1": {"password": "prod@2024", "role": "Production", "full_name": "Kshitij Palshikar"}
             }
         }
         with open(CRED_FILE, "w") as f:
             json.dump(default_creds, f, indent=4)
+        print(f"✓ Created default credentials at: {CRED_FILE}")
         return default_creds
     
     with open(CRED_FILE, "r") as f:
         return json.load(f)
 
 def save_credentials(credentials):
+    """Save user credentials to assets/credentials.json"""
     with open(CRED_FILE, "w") as f:
         json.dump(credentials, f, indent=4)
 
 def authenticate_user(username, password, credentials):
+    """Authenticate user and return role and full name"""
     users = credentials.get("users", {})
     if username in users:
         if users[username]["password"] == password:
-            return users[username]["role"]
-    return None
+            return users[username]["role"], users[username].get("full_name", username)
+    return None, None
 
 # ====================================================== 
-# ROUTER
+# ROUTER - PASS USERNAME AND FULL_NAME TO MODULES
 # ====================================================== 
-def route_to_role(username, role):
+def route_to_role(username, full_name, role):
+    """Route to appropriate module with username and full_name as command-line arguments"""
     if role == "Quality":
-        subprocess.Popen(["py", os.path.join("pages", "quality.py")])
+        # Pass both username and full_name to quality module
+        subprocess.Popen(["python", "quality.py", username, full_name])
     elif role == "Manager":
-        subprocess.Popen(["py", os.path.join("pages", "manager.py")])
+        subprocess.Popen(["python", "manager.py", username, full_name])
     elif role == "Production":
-        subprocess.Popen(["py", os.path.join("pages", "production.py")])
+        # Pass both username and full_name to production module
+        subprocess.Popen(["python", "production.py", username, full_name])
     elif role == "Admin":
         messagebox.showinfo("Admin", "Admin panel opened!")
     else:
@@ -69,7 +79,7 @@ class AdminPanel:
     def __init__(self, parent, credentials):
         self.window = tk.Toplevel(parent)
         self.window.title("Admin Panel - User Management")
-        self.window.geometry("600x500")
+        self.window.geometry("700x550")
         self.window.configure(bg="#2b2b2b")
         self.credentials = credentials
         
@@ -81,12 +91,19 @@ class AdminPanel:
         frame = tk.Frame(self.window, bg="#2b2b2b")
         frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         
-        columns = ("Username", "Role", "Password")
+        columns = ("Username", "Full Name", "Role", "Password")
         self.tree = ttk.Treeview(frame, columns=columns, show="headings", height=12)
         
         for col in columns:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=180)
+            if col == "Full Name":
+                self.tree.column(col, width=200)
+            elif col == "Username":
+                self.tree.column(col, width=120)
+            elif col == "Role":
+                self.tree.column(col, width=100)
+            else:
+                self.tree.column(col, width=100)
         
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
@@ -119,7 +136,8 @@ class AdminPanel:
         
         users = self.credentials.get("users", {})
         for username, data in users.items():
-            self.tree.insert("", tk.END, values=(username, data["role"], "••••••"))
+            full_name = data.get("full_name", username)
+            self.tree.insert("", tk.END, values=(username, full_name, data["role"], "••••••"))
     
     def add_user(self):
         AddEditUserDialog(self.window, self.credentials, self.refresh_users)
@@ -158,7 +176,7 @@ class AddEditUserDialog:
     def __init__(self, parent, credentials, refresh_callback, username=None):
         self.window = tk.Toplevel(parent)
         self.window.title("Add User" if not username else "Edit User")
-        self.window.geometry("400x280")
+        self.window.geometry("450x350")
         self.window.configure(bg="#2b2b2b")
         self.credentials = credentials
         self.refresh_callback = refresh_callback
@@ -173,29 +191,39 @@ class AddEditUserDialog:
         form_frame = tk.Frame(self.window, bg="#2b2b2b")
         form_frame.pack(pady=10, padx=30)
         
+        # Username
         tk.Label(form_frame, text="Username:", bg="#2b2b2b", fg="#ffffff",
                 font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w", pady=8)
         self.username_entry = tk.Entry(form_frame, width=25, font=("Segoe UI", 10))
         self.username_entry.grid(row=0, column=1, pady=8, padx=10)
         
-        tk.Label(form_frame, text="Password:", bg="#2b2b2b", fg="#ffffff",
+        # Full Name
+        tk.Label(form_frame, text="Full Name:", bg="#2b2b2b", fg="#ffffff",
                 font=("Segoe UI", 10)).grid(row=1, column=0, sticky="w", pady=8)
-        self.password_entry = tk.Entry(form_frame, width=25, show="*", font=("Segoe UI", 10))
-        self.password_entry.grid(row=1, column=1, pady=8, padx=10)
+        self.fullname_entry = tk.Entry(form_frame, width=25, font=("Segoe UI", 10))
+        self.fullname_entry.grid(row=1, column=1, pady=8, padx=10)
         
-        tk.Label(form_frame, text="Role:", bg="#2b2b2b", fg="#ffffff",
+        # Password
+        tk.Label(form_frame, text="Password:", bg="#2b2b2b", fg="#ffffff",
                 font=("Segoe UI", 10)).grid(row=2, column=0, sticky="w", pady=8)
+        self.password_entry = tk.Entry(form_frame, width=25, show="*", font=("Segoe UI", 10))
+        self.password_entry.grid(row=2, column=1, pady=8, padx=10)
+        
+        # Role
+        tk.Label(form_frame, text="Role:", bg="#2b2b2b", fg="#ffffff",
+                font=("Segoe UI", 10)).grid(row=3, column=0, sticky="w", pady=8)
         self.role_var = tk.StringVar(value="Quality")
         self.role_combo = ttk.Combobox(form_frame, textvariable=self.role_var,
                                       values=["Admin", "Manager", "Quality", "Production"],
                                       state="readonly", width=23, font=("Segoe UI", 10))
-        self.role_combo.grid(row=2, column=1, pady=8, padx=10)
+        self.role_combo.grid(row=3, column=1, pady=8, padx=10)
         
         # Load existing data if editing
         if username:
             self.username_entry.insert(0, username)
             self.username_entry.config(state="disabled")
             user_data = self.credentials["users"][username]
+            self.fullname_entry.insert(0, user_data.get("full_name", username))
             self.password_entry.insert(0, user_data["password"])
             self.role_var.set(user_data["role"])
         
@@ -213,25 +241,30 @@ class AddEditUserDialog:
     
     def save_user(self):
         username = self.username_entry.get().strip()
+        full_name = self.fullname_entry.get().strip()
         password = self.password_entry.get()
         role = self.role_var.get()
         
-        if not username or not password:
-            messagebox.showerror("Error", "Username and password are required!")
+        if not username or not password or not full_name:
+            messagebox.showerror("Error", "Username, full name, and password are required!")
             return
         
         if not self.edit_username and username in self.credentials["users"]:
             messagebox.showerror("Error", "Username already exists!")
             return
         
-        self.credentials["users"][username] = {"password": password, "role": role}
+        self.credentials["users"][username] = {
+            "password": password, 
+            "role": role,
+            "full_name": full_name
+        }
         save_credentials(self.credentials)
         self.refresh_callback()
         messagebox.showinfo("Success", "User saved successfully!")
         self.window.destroy()
 
 # ====================================================== 
-# LOGIN UI
+# LOGIN UI - WITH EMERSON LOGO
 # ====================================================== 
 class LoginPage:
     def __init__(self, root):
@@ -242,13 +275,37 @@ class LoginPage:
         self.root.configure(bg="#2b2b2b")
         self.credentials = load_credentials()
         
-        # Header
-        header_frame = tk.Frame(root, bg="#1e1e1e", height=100)
+        # Header with Logo
+        header_frame = tk.Frame(root, bg="#2b2b2b", height=120)
         header_frame.pack(fill=tk.X)
         header_frame.pack_propagate(False)
         
-        tk.Label(header_frame, text="INPROCESS TOOL", 
-                font=("Segoe UI", 26, "bold"), bg="#1e1e1e", fg="#00bcd4").pack(pady=30)
+        # Load and display Emerson logo
+        try:
+            logo_path = os.path.join(ASSETS_DIR, "EmersonLogo.png")
+            if os.path.exists(logo_path):
+                logo_img = Image.open(logo_path)
+                # Resize logo to fit nicely in header (maintain aspect ratio)
+                # Adjust these dimensions as needed for your logo
+                logo_img.thumbnail((200, 150), Image.Resampling.LANCZOS)
+                self.logo_photo = ImageTk.PhotoImage(logo_img)
+                
+                logo_label = tk.Label(header_frame, image=self.logo_photo,bg="#2b2b2b")
+                logo_label.pack(pady=10)
+                print(f"✓ Logo loaded from: {logo_path}")
+            else:
+                # Fallback to text if logo not found
+                tk.Label(header_frame, text="INPROCESS TOOL", 
+                        font=("Segoe UI", 26, "bold"), 
+                        bg="#1e1e1e", fg="#00bcd4").pack(pady=30)
+                print(f"⚠️ Logo not found at: {logo_path}")
+                print(f"   Please place EmersonLogo.png in the assets folder")
+        except Exception as e:
+            # Fallback to text if error loading logo
+            tk.Label(header_frame, text="INPROCESS TOOL", 
+                    font=("Segoe UI", 26, "bold"), 
+                    bg="#1e1e1e", fg="#00bcd4").pack(pady=30)
+            print(f"⚠️ Error loading logo: {e}")
         
         # Main container
         container = tk.Frame(root, bg="#2b2b2b")
@@ -301,13 +358,13 @@ class LoginPage:
             messagebox.showerror("Error", "Please enter username and password!")
             return
         
-        role = authenticate_user(username, password, self.credentials)
+        role, full_name = authenticate_user(username, password, self.credentials)
         
         if role:
-            messagebox.showinfo("Success", f"Welcome, {username}!\nRole: {role}")
+            messagebox.showinfo("Success", f"Welcome, {full_name}!\nRole: {role}")
             if role != "Admin":
                 self.root.destroy()
-                route_to_role(username, role)
+                route_to_role(username, full_name, role)  # PASS BOTH USERNAME AND FULL_NAME
             else:
                 AdminPanel(self.root, self.credentials)
         else:

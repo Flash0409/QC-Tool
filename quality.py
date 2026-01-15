@@ -25,7 +25,12 @@ import os
 import cv2
 import io
 import re
+import sys
 
+LOGGED_IN_USERNAME = sys.argv[1] if len(sys.argv) > 1 else None
+LOGGED_IN_FULLNAME = sys.argv[2] if len(sys.argv) > 2 else None
+
+print(f"✓ Quality Tool started by: {LOGGED_IN_FULLNAME} (username: {LOGGED_IN_USERNAME})")
 TESSERACT_PATH = r"C:\Users\E1547548\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
 if os.path.exists(TESSERACT_PATH):
@@ -126,7 +131,8 @@ class ManagerDB:
         return ws.cell(row=target_row, column=target_col).value
 
     def get_status_from_interphase(self, excel_path):
-        """Read Interphase worksheet and determine status based on reference number
+        """Read Interphase worksheet and determine status based on HIGHEST filled reference number
+        
         Returns: status string or None if not determined from Interphase
         """
         if not excel_path or not os.path.exists(excel_path):
@@ -136,58 +142,57 @@ class ManagerDB:
             from openpyxl import load_workbook
             wb = load_workbook(excel_path, data_only=True)
             
-            # Check if Interphase worksheet exists
             if 'Interphase' not in wb.sheetnames:
                 wb.close()
                 return None
             
             ws = wb['Interphase']
             
-            # Find the lowest filled status cell in column D
-            lowest_status_row = None
-            lowest_ref_no = None
+            # Find the HIGHEST reference number that has a status
+            highest_ref_num = 0
             
-            # Start from row 2 (assuming row 1 is header)
-            for row in range(2, ws.max_row + 1):
-                status_cell = self.read_cell(ws, row, 'D')
+            # Start from row 11 (typical Interphase data starts here)
+            for row in range(11, ws.max_row + 1):
+                status_cell = self.read_cell(ws, row, 'D')  # Status column
                 
                 # If status cell has content, check the reference number
-                if status_cell:
-                    ref_no_cell = self.read_cell(ws, row, 'B')
+                if status_cell and str(status_cell).strip():
+                    ref_no_cell = self.read_cell(ws, row, 'B')  # Reference column
                     
                     if ref_no_cell:
-                        lowest_status_row = row
-                        lowest_ref_no = str(ref_no_cell).strip()
+                        try:
+                            ref_str = str(ref_no_cell).strip()
+                            
+                            # Handle range formats like "1-2" - take the LAST number
+                            if '-' in ref_str:
+                                ref_num = int(ref_str.split('-')[-1])
+                            else:
+                                ref_num = int(ref_str)
+                            
+                            # Track highest completed reference
+                            if ref_num > highest_ref_num:
+                                highest_ref_num = ref_num
+                        
+                        except (ValueError, IndexError):
+                            continue
             
             wb.close()
             
-            # If we found a reference number, determine the status
-            if lowest_ref_no:
-                try:
-                    # Handle range formats like "1-2" or single numbers like "5"
-                    if '-' in lowest_ref_no:
-                        # Get the first number in the range
-                        ref_num = int(lowest_ref_no.split('-')[0])
-                    else:
-                        ref_num = int(lowest_ref_no)
-                    
-                    # Determine status based on reference number
-                    if 1 <= ref_num <= 2:
-                        return 'project_info_sheet'
-                    elif 3 <= ref_num <= 9:
-                        return 'mechanical_assembly'
-                    elif 10 <= ref_num <= 18:
-                        return 'component_assembly'
-                    elif 19 <= ref_num <= 26:
-                        return 'final_assembly'
-                    elif 27 <= ref_num <= 31:
-                        return 'final_documentation'
-                
-                except (ValueError, IndexError):
-                    # If we can't parse the reference number, return None
-                    pass
-            
-            return None
+            # Determine status based on highest completed reference number
+            if highest_ref_num == 0:
+                return 'quality_inspection'  # Nothing completed yet
+            elif 1 <= highest_ref_num <= 2:
+                return 'project_info_sheet'
+            elif 3 <= highest_ref_num <= 9:
+                return 'mechanical_assembly'
+            elif 10 <= highest_ref_num <= 18:
+                return 'component_assembly'
+            elif 19 <= highest_ref_num <= 26:
+                return 'final_assembly'
+            elif highest_ref_num >= 27:
+                return 'final_documentation'
+            else:
+                return 'quality_inspection'
             
         except Exception as e:
             print(f"Error reading Interphase worksheet: {e}")
@@ -305,6 +310,8 @@ class ManagerDB:
 class CircuitInspector:
     def __init__(self, root):
         self.root = root
+        self.logged_in_username = LOGGED_IN_USERNAME
+        self.logged_in_fullname = LOGGED_IN_FULLNAME
         self.root.title("Quality Inspection Tool - Highlighter Edition")
         self.root.geometry("1400x900")
 
@@ -1255,10 +1262,7 @@ class CircuitInspector:
             self.write_cell(ws, row_num, self.punch_cols['desc'], punch_text)
             self.write_cell(ws, row_num, self.punch_cols['category'], component_type)
 
-            try:
-                uname = os.getlogin()
-            except:
-                uname = getpass.getuser()
+            uname = self.logged_in_fullname or "Unknown User"
 
             self.write_cell(ws, row_num, self.punch_cols['checked_name'], uname)
             # Updated to include timestamp + date
@@ -1359,10 +1363,7 @@ class CircuitInspector:
             self.write_cell(ws, row_num, self.punch_cols['desc'], punch_text)
             self.write_cell(ws, row_num, self.punch_cols['category'], component_type)
 
-            try:
-                uname = os.getlogin()
-            except:
-                uname = getpass.getuser()
+            uname = self.logged_in_fullname or "Unknown User"
 
             self.write_cell(ws, row_num, self.punch_cols['checked_name'], uname)
             # Updated to include timestamp + date
@@ -1472,10 +1473,7 @@ class CircuitInspector:
             self.write_cell(ws, row_num, self.punch_cols['desc'], custom_action)
             self.write_cell(ws, row_num, self.punch_cols['category'], custom_category)
 
-            try:
-                uname = os.getlogin()
-            except:
-                uname = getpass.getuser()
+            uname = self.logged_in_fullname or "Unknown User"
 
             self.write_cell(ws, row_num, self.punch_cols['checked_name'], uname)
             # Updated to include timestamp + date
@@ -1507,7 +1505,7 @@ class CircuitInspector:
                     custom_category,
                     None
                 )
-                
+                self.sync_manager_stats_only()
             except Exception as e:
                 print(f"Manager category logging failed: {e}")
 
@@ -1733,23 +1731,7 @@ class CircuitInspector:
             with open(save_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             
-            # Count annotation types for feedback
-            highlight_count = len([a for a in self.annotations if a.get('type') == 'highlight'])
-            pen_count = len([a for a in self.annotations if a.get('type') == 'pen'])
-            text_count = len([a for a in self.annotations if a.get('type') == 'text'])
             
-            summary = f"Session saved successfully!\n\n"
-            summary += f"Total annotations: {len(self.annotations)}\n"
-            if highlight_count > 0:
-                summary += f"🖍️ Highlights: {highlight_count}\n"
-            if pen_count > 0:
-                summary += f"✏️ Pen strokes: {pen_count}\n"
-            if text_count > 0:
-                summary += f"🅰️ Text annotations: {text_count}\n"
-            summary += f"\nSaved to:\n{save_path}"
-            
-            messagebox.showinfo("Saved", summary)
-            self._flash_status(f"✓ Saved {len(self.annotations)} annotations", bg='#10b981')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save session:\n{e}")
@@ -1833,18 +1815,6 @@ class CircuitInspector:
 
         self.display_page()
         
-        summary = f"Session loaded successfully!\n\n"
-        summary += f"Total annotations: {len(self.annotations)}\n"
-        if highlight_count > 0:
-            summary += f"🖍️ Highlights: {highlight_count}\n"
-        if pen_count > 0:
-            summary += f"✏️ Pen strokes: {pen_count}\n"
-        if text_count > 0:
-            summary += f"🅰️ Text annotations: {text_count}\n"
-        summary += f"\nMake sure the same PDF is open."
-        
-        messagebox.showinfo("Loaded", summary)
-        self._flash_status(f"✓ Loaded {len(self.annotations)} annotations", bg='#3b82f6')
 
     # ================================================================
     # EXPORT ANNOTATED PDF - WITH HIGHLIGHTER SUPPORT
@@ -2105,8 +2075,6 @@ class CircuitInspector:
     
             out_doc.save(save_path)
             out_doc.close()
-    
-            messagebox.showinfo("Success", f"Annotated PDF saved to:\n{save_path}")
             self.sync_manager_stats_only()
     
         except PermissionError:
@@ -2151,7 +2119,7 @@ class CircuitInspector:
         tools_menu.add_command(label="Review Checklist", command=self.review_checklist_now, accelerator="Ctrl+R")
         tools_menu.add_command(label="Punch Closing Mode", command=self.punch_closing_mode, accelerator="Ctrl+Shift+P")
         tools_menu.add_separator()
-        tools_menu.add_command(label="🔍 Verify Rework", command=self.view_production_handbacks, accelerator="Ctrl+Shift+V")
+        tools_menu.add_command(label="🔍 Verify ", command=self.view_production_handbacks, accelerator="Ctrl+Shift+V")
         
         # View Menu
         view_menu = Menu(menubar, tearoff=0, bg='#1e293b', fg='white', activebackground='#3b82f6')
@@ -2330,14 +2298,14 @@ class CircuitInspector:
         verify_btn_style = btn_style.copy()
         verify_btn_style['bg'] = '#ec4899'
         
-        tk.Button(right_frame, text="🔍 Verify Rework",
+        tk.Button(right_frame, text="🔍 Verify ",
                  command=self.view_production_handbacks,
                  **verify_btn_style).pack(side=tk.RIGHT, padx=3)
         
         handover_btn_style = btn_style.copy()
         handover_btn_style['bg'] = '#8b5cf6'
         
-        tk.Button(right_frame, text="🚀 Handover to Production",
+        tk.Button(right_frame, text="🚀 Handover ",
                  command=self.handover_to_production,
                  **handover_btn_style).pack(side=tk.RIGHT, padx=3)
         
@@ -2545,27 +2513,6 @@ class CircuitInspector:
                 self._flash_status("✓ Annotation removed", bg='#10b981')
         
         self.update_tool_pane()
-
-    def clear_all_annotations(self):
-        """Clear all annotations with confirmation"""
-        if not self.annotations:
-            messagebox.showinfo("No Annotations", "There are no annotations to clear.", icon='info')
-            return
-        
-        confirm = messagebox.askyesno(
-            "Clear All Annotations",
-            f"Are you sure you want to delete all {len(self.annotations)} annotations?\n\n"
-            "This action cannot be undone!",
-            icon='warning'
-        )
-        
-        if confirm:
-            self.annotations.clear()
-            self.selected_annotation = None
-            self.undo_stack.clear()
-            self.display_page()
-            self.update_tool_pane()
-            messagebox.showinfo("Cleared", "All annotations have been removed.", icon='info')
 
     # ================================================================
     # NAVIGATION AND ZOOM
@@ -3260,13 +3207,10 @@ class CircuitInspector:
 
         def do_action_set_status(status_value):
             r, ref_str, desc = matches[pos[0]]
-            current_date = datetime.now().strftime("%Y-%m-%d")
+            current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             # Get username
-            try:
-                username = os.getlogin()
-            except:
-                username = getpass.getuser()
+            username = self.logged_in_fullname or "Unknown User"
 
             try:
                 # Update status, name, and date
@@ -3294,9 +3238,11 @@ class CircuitInspector:
 
         def on_ok():
             do_action_set_status("OK")
+            self.sync_manager_stats_only()
 
         def on_nok():
             do_action_set_status("NOK")
+            self.sync_manager_stats_only()
 
         def on_na():
             """Handle N/A status with mandatory remark"""
@@ -3317,14 +3263,11 @@ class CircuitInspector:
                 )
                 return
             
-            current_date = datetime.now().strftime("%Y-%m-%d")
+            current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             try:
                 # Get username
-                try:
-                    username = os.getlogin()
-                except:
-                    username = getpass.getuser()
+                uname = self.logged_in_fullname or "Unknown User"
                 
                 # Write all columns properly
                 self.write_cell(ws, r, status_col, "N/A")
@@ -3336,6 +3279,7 @@ class CircuitInspector:
                 messagebox.showinfo("Remark Saved", 
                                   f"N/A status with remark:\n{remark}",
                                   parent=dlg)
+                self.sync_manager_stats_only()
             except PermissionError:
                 messagebox.showerror("File Locked", 
                                    "⚠️ Please close the Excel file and try again.",
@@ -3471,7 +3415,6 @@ class CircuitInspector:
 
         try:
             shutil.copy2(self.excel_file, save_path)
-            messagebox.showinfo("Saved", f"Final Interphase Excel saved:\n\n{save_path}")
         except PermissionError:
             messagebox.showerror("File Open", "Close the Excel file and try again.")
         except Exception as e:
@@ -3561,7 +3504,7 @@ class CircuitInspector:
     # HANDOVER TO PRODUCTION
     # ================================================================
     def handover_to_production(self):
-        """Handover current cabinet to production"""
+        """Handover current cabinet to production with checklist validation"""
         
         if not self.pdf_document or not self.excel_file:
             messagebox.showwarning("Incomplete", 
@@ -3583,6 +3526,40 @@ class CircuitInspector:
             if not proceed:
                 return
         
+        # ✅ Check checklist completion BEFORE handover
+        is_complete, pending_count = self.is_checklist_complete()
+        
+        if not is_complete:
+            messagebox.showwarning(
+                "Checklist Incomplete",
+                f"⚠️ Cannot handover to production.\n\n"
+                f"{pending_count} checklist item(s) not reviewed.\n\n"
+                "Please complete the checklist first.",
+                icon='warning'
+            )
+            
+            # Ask if they want to complete it now
+            complete_now = messagebox.askyesno(
+                "Complete Checklist?",
+                "Would you like to complete the checklist now?",
+                icon='question'
+            )
+            
+            if complete_now:
+                self.review_checklist_now()
+                
+                # Check again after review
+                is_complete, pending_count = self.is_checklist_complete()
+                
+                if not is_complete:
+                    messagebox.showinfo(
+                        "Handover Cancelled",
+                        "Checklist still incomplete. Handover cancelled."
+                    )
+                    return
+            else:
+                return
+        
         # Count open punches
         open_punches = self.count_open_punches()
         
@@ -3600,16 +3577,17 @@ class CircuitInspector:
         self.save_session()
         
         # Get user name
-        try:
-            username = os.getlogin()
-        except:
-            username = getpass.getuser()
+        username = self.logged_in_fullname or "Unknown User"
         
         # Prepare handover data
         session_path = os.path.join(
             self.project_dirs.get("sessions", ""),
             f"{self.cabinet_id}_annotations.json"
         )
+        
+        error_highlights = [a for a in self.annotations 
+                           if a.get('type') == 'highlight' and a.get('color') == 'orange']
+        total_punches = len(error_highlights)
         
         handover_data = {
             "cabinet_id": self.cabinet_id,
@@ -3618,24 +3596,45 @@ class CircuitInspector:
             "pdf_path": self.current_pdf_path,
             "excel_path": self.excel_file,
             "session_path": session_path if os.path.exists(session_path) else None,
-            "total_punches": len([a for a in self.annotations if a.get('type') == 'error']),
+            "total_punches": total_punches,
             "open_punches": open_punches,
-            "closed_punches": len([a for a in self.annotations if a.get('type') == 'error']) - open_punches,
+            "closed_punches": total_punches - open_punches,
             "handed_over_by": username,
             "handed_over_date": datetime.now().isoformat()
         }
         
-        # FIXED: Use handover_db instead of db
-        success = self.handover_db.add_quality_handover(handover_data)
+        # ✅ NEW: Check and remove from rework queue if present
+        try:
+            if self.handover_db.is_in_rework_queue(self.cabinet_id):
+                print(f"⚠️ {self.cabinet_id} found in rework queue - removing...")
+                
+                removed = self.handover_db.remove_from_rework_queue(
+                    self.cabinet_id,
+                    removed_by=username,
+                    reason="Re-opened for quality inspection, now handing over to production"
+                )
+                
+                if removed:
+                    print(f"✓ Removed {self.cabinet_id} from rework verification queue")
+                else:
+                    print(f"⚠️ Failed to remove {self.cabinet_id} from rework queue")
+                    
+        except Exception as e:
+            print(f"⚠️ Error checking/removing from rework queue: {e}")
+            import traceback
+            traceback.print_exc()
         
-        # FIXED: Use correct method name
+        # Add to production queue
+        success = self.handover_db.add_quality_handover(handover_data)
         self.update_status_and_sync('handed_to_production')
         
         if success:
             messagebox.showinfo("Handover Complete", 
                               "✓ Successfully handed over to Production\n\n"
                               f"Cabinet: {self.cabinet_id}\n"
-                              f"Open Punches: {open_punches}")
+                              f"✓ Checklist: Complete\n"
+                              f"✓ Total Punches: {total_punches}\n"
+                              f"⚠ Open Punches: {open_punches}")
         else:
             messagebox.showwarning("Already Handed Over", 
                                  "Cabinet already in production queue")
@@ -3904,43 +3903,160 @@ class CircuitInspector:
         
         # Count open punches
         open_count = self.count_open_punches()
-        
-        # Show initial info
-        info_msg = (
-            f"Cabinet: {item_data['cabinet_id']}\n"
-            f"Project: {item_data['project_name']}\n\n"
-            f"Rework by: {item_data['rework_completed_by']}\n"
-            f"Date: {item_data['rework_completed_date'][:10]}\n\n"
-            f"Open Punches: {open_count}\n\n"
-            f"Opening Punch Closing Mode..."
-        )
-        
-        messagebox.showinfo("Production Handback Loaded", info_msg, icon='info')
-        
-        # Auto-open punch closing mode
-        if open_count > 0:
-            self.punch_closing_mode_for_verification(item_data)
-        else:
-            # No punches - directly ask to close
-            self.finalize_verification(item_data)
+        self.punch_closing_mode()
 
 
     # ============================================================================
     # NEW: punch_closing_mode_for_verification - Modified punch closing for handback
     # ============================================================================
 
+    def is_checklist_complete(self):
+        """Check if all Interphase checklist items have been reviewed
+        
+        Returns:
+            tuple: (is_complete: bool, pending_count: int)
+        """
+        if not self.excel_file or not os.path.exists(self.excel_file):
+            return (True, 0)  # Assume complete if no Excel
+        
+        try:
+            wb = load_workbook(self.excel_file, data_only=True)
+            if self.interphase_sheet_name not in wb.sheetnames:
+                wb.close()
+                return (True, 0)
+            
+            ws = wb[self.interphase_sheet_name]
+            ref_col = self.interphase_cols['ref_no']
+            status_col = self.interphase_cols['status']
+            
+            pending_count = 0
+            max_row = ws.max_row if ws.max_row else 2000
+            
+            for r in range(11, max_row + 1):
+                ref_val = self.read_cell(ws, r, ref_col)
+                if ref_val is None:
+                    continue
+                
+                status_val = self.read_cell(ws, r, status_col)
+                status_str = str(status_val).strip().lower() if status_val is not None else ''
+                
+                # Check if status is filled (OK, NOK, or N/A)
+                if status_str not in ('ok', 'nok', 'n/a', 'na', 'not applicable'):
+                    pending_count += 1
+            
+            wb.close()
+            return (pending_count == 0, pending_count)
+            
+        except Exception as e:
+            print(f"Error checking checklist completion: {e}")
+            return (True, 0)  # Assume complete on error
+
+
+    def auto_finalize_if_complete(self):
+        """Automatically finalize cabinet if all punches are closed
+        
+        This checks:
+        1. Zero open punches
+        2. All checklist items reviewed
+        3. Then saves Excel, exports PDF, updates status to 'Closed'
+        """
+        if not self.pdf_document or not self.cabinet_id:
+            return
+        
+        # Check open punches
+        open_punches = self.count_open_punches()
+        
+        if open_punches > 0:
+            print(f"⚠️ Cannot auto-finalize: {open_punches} open punch(es) remaining")
+            return
+        
+        print("✓ All punches closed - checking checklist...")
+        
+        # Check checklist completion
+        is_complete, pending_count = self.is_checklist_complete()
+        
+        if not is_complete:
+            print(f"⚠️ Checklist incomplete: {pending_count} item(s) pending")
+            
+            # Ask user if they want to complete checklist now
+            proceed = messagebox.askyesno(
+                "Checklist Incomplete",
+                f"⚠️ {pending_count} checklist item(s) not reviewed.\n\n"
+                "Would you like to complete the checklist now?",
+                icon='warning'
+            )
+            
+            if proceed:
+                # Open checklist review dialog
+                self.review_checklist_now()
+                
+                # After review, check again
+                is_complete, pending_count = self.is_checklist_complete()
+                
+                if not is_complete:
+                    messagebox.showinfo(
+                        "Checklist Still Incomplete",
+                        "Cabinet cannot be finalized until checklist is complete."
+                    )
+                    return
+            else:
+                return
+        
+        print("✓ Checklist complete - auto-finalizing cabinet...")
+        
+        try:
+            # 1. Save session
+            self.save_session()
+            
+            # 2. Save Interphase Excel
+            interphase_path = os.path.join(
+                self.project_dirs["interphase_export"],
+                f"{self.cabinet_id.replace(' ', '_')}_Interphase.xlsx"
+            )
+            
+            try:
+                shutil.copy2(self.excel_file, interphase_path)
+                print(f"✓ Interphase Excel saved: {interphase_path}")
+            except Exception as e:
+                print(f"⚠️ Failed to save Interphase Excel: {e}")
+            
+            # 3. Export annotated PDF
+            self.export_annotated_pdf()
+            print("✓ Annotated PDF exported")
+            
+            # 4. Update status to Closed
+            self.update_status_and_sync('closed')
+            print("✓ Status updated to: Closed")
+            
+            # 5. Show success message
+            messagebox.showinfo(
+                "Cabinet Finalized",
+                f"✓ Cabinet {self.cabinet_id} has been finalized!\n\n"
+                "• All punches closed\n"
+                "• Checklist complete\n"
+                "• Excel exported\n"
+                "• PDF exported\n"
+                "• Status: Closed",
+                icon='info'
+            )
+            
+        except Exception as e:
+            messagebox.showerror("Finalization Error", f"Failed to finalize cabinet:\n{e}")
+            import traceback
+            traceback.print_exc()
+
+
+    # UPDATED: punch_closing_mode - with auto-finalization
     def punch_closing_mode(self):
         """Modern dialog for punch closing workflow - Converts orange to green highlights"""
         punches = self.read_open_punches_from_excel()
-    
+
         if not punches:
-            messagebox.showinfo("No Open Punches", 
-                              "✓ All punches are closed!\nNo items require attention.",
-                              icon='info')
+            self.auto_finalize_if_complete()
             return
-    
+
         punches.sort(key=lambda p: (not p['implemented'], p['sr_no']))
-    
+
         # Modern dialog window
         dlg = tk.Toplevel(self.root)
         dlg.title("Punch Closing Mode")
@@ -4012,9 +4128,9 @@ class CircuitInspector:
                              relief=tk.FLAT, padx=10, pady=8)
         text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
         text_widget.config(state=tk.DISABLED)
-    
+
         pos = [0]
-    
+
         def show_item():
             p = punches[pos[0]]
             
@@ -4037,8 +4153,8 @@ class CircuitInspector:
             text_widget.insert(tk.END, p['punch_text'])
             text_widget.insert(tk.END, f"\n\n──────────────────\n")
             text_widget.insert(tk.END, f"Category: {p['category']}\n")
-    
-            # Find annotation - checks for highlight type and old rectangle type
+
+            # Find annotation
             ann = next((a for a in self.annotations 
                        if a.get('sr_no') == p['sr_no'] 
                        or (a.get('excel_row') == p['row'])), None)
@@ -4047,16 +4163,15 @@ class CircuitInspector:
                 text_widget.insert(tk.END, f"\n──────────────────\n")
                 text_widget.insert(tk.END, "Quality Remarks:\n")
                 text_widget.insert(tk.END, ann['quality_remark'])
-    
+
             text_widget.config(state=tk.DISABLED)
-    
+
         show_item()
-    
+
         def add_remark():
-            """Add quality-side remark to push cabinet back to production"""
+            """Add quality-side remark"""
             p = punches[pos[0]]
             
-            # Find annotation
             ann = next((a for a in self.annotations 
                        if a.get('sr_no') == p['sr_no'] 
                        or (a.get('excel_row') == p['row'])), None)
@@ -4070,41 +4185,34 @@ class CircuitInspector:
                 parent=dlg
             )
             
-            if remark is not None:  # Allow empty string to clear remark
+            if remark is not None:
                 if ann:
                     ann['quality_remark'] = remark
                     messagebox.showinfo("Success", "Quality remark added successfully!")
-                    show_item()  # Refresh display
+                    show_item()
                 else:
                     messagebox.showwarning("Warning", "No annotation found for this punch item.")
-    
+
         def close_punch():
             p = punches[pos[0]]
-    
-            try:
-                default_user = os.getlogin()
-            except:
-                default_user = getpass.getuser()
-    
-            name = simpledialog.askstring("Closed By", 
-                                         "Enter your name to close this punch:", 
-                                         initialvalue=default_user, 
-                                         parent=dlg)
+
+            default_user = self.logged_in_fullname or "Unknown User"
+
+            name = default_user
             if not name:
                 return
-    
+
             try:
                 wb = load_workbook(self.excel_file)
                 ws = wb[self.punch_sheet_name]
-    
+
                 self.write_cell(ws, p['row'], self.punch_cols['closed_name'], name)
-                # Updated to include timestamp + date
                 self.write_cell(ws, p['row'], self.punch_cols['closed_date'], 
                               datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    
+
                 wb.save(self.excel_file)
                 wb.close()
-    
+
             except PermissionError:
                 messagebox.showerror("File Locked", 
                                    "⚠️ Please close the Excel file and try again.")
@@ -4112,35 +4220,28 @@ class CircuitInspector:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to close punch:\n{e}")
                 return
-    
-            # Find and convert annotation color from orange to green
+
+            # Find and convert annotation color
             ann = next((a for a in self.annotations 
                        if a.get('sr_no') == p['sr_no'] 
                        or (a.get('excel_row') == p['row'])), None)
             
             if ann:
-                # Convert orange highlight to green (KEEP the annotation)
                 if ann.get('type') == 'highlight' and ann.get('color') == 'orange':
-                    ann['color'] = 'green'  # Change from error to OK
+                    ann['color'] = 'green'
                     print(f"✓ Converted annotation to green for SR {p['sr_no']}")
-                
-                # Also handle old rectangle-style error annotations
                 elif ann.get('type') == 'error':
-                    ann['type'] = 'ok'  # Convert error rectangle to OK
+                    ann['type'] = 'ok'
                     print(f"✓ Converted error rectangle to OK for SR {p['sr_no']}")
                 
-                # Store closure information
                 ann['closed_by'] = name
                 ann['closed_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             else:
                 print(f"⚠️ Warning: No annotation found for SR {p['sr_no']}")
-    
-            # Refresh display to show green highlight
+
             self.display_page()
-            
-            # Update stats after closing
             self.sync_manager_stats_only()
-    
+
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
                 show_item()
@@ -4149,17 +4250,20 @@ class CircuitInspector:
                                   f"✓ All punches closed!\n{len(punches)} items processed.",
                                   icon='info')
                 dlg.destroy()
-    
+                
+                # ✨ NEW: Auto-finalize after closing dialog
+                self.root.after(100, self.auto_finalize_if_complete)
+
         def next_item():
             if pos[0] < len(punches) - 1:
                 pos[0] += 1
                 show_item()
-    
+
         def prev_item():
             if pos[0] > 0:
                 pos[0] -= 1
                 show_item()
-    
+
         # Buttons
         btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)
         btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))
@@ -4177,7 +4281,7 @@ class CircuitInspector:
             'pady': 18,
             'width': 15
         }
-    
+
         tk.Button(btn_container, text="◀  Previous", command=prev_item, 
                  bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
         
@@ -4194,273 +4298,257 @@ class CircuitInspector:
         
         tk.Button(btn_container, text="Cancel", command=dlg.destroy, 
                  bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-    
+
         dlg.wait_window()
 
-
-    def punch_closing_mode_for_verification(self, item_data):
-            """Punch closing mode specifically for verification workflow - Converts orange to green"""
+    def auto_finalize_if_complete(self):
+        """Automatically finalize cabinet if all punches are closed
+        
+        This checks:
+        1. Zero open punches
+        2. All checklist items reviewed
+        3. Then saves Excel, exports PDF, updates status to 'Closed'
+        4. Removes from rework queue if present
+        """
+        if not self.pdf_document or not self.cabinet_id:
+            return
+        
+        # Check open punches
+        open_punches = self.count_open_punches()
+        
+        if open_punches > 0:
+            print(f"⚠️ Cannot auto-finalize: {open_punches} open punch(es) remaining")
+            return
+        
+        print("✓ All punches closed - checking checklist...")
+        
+        # Check checklist completion
+        is_complete, pending_count = self.is_checklist_complete()
+        
+        if not is_complete:
+            print(f"⚠️ Checklist incomplete: {pending_count} item(s) pending")
             
-            punches = self.read_open_punches_from_excel()
+            # Ask user if they want to complete checklist now
+            proceed = messagebox.askyesno(
+                "Checklist Incomplete",
+                f"⚠️ {pending_count} checklist item(s) not reviewed.\n\n"
+                "Would you like to complete the checklist now?",
+                icon='warning'
+            )
             
-            if not punches:
-                # All closed, proceed to finalization
-                self.finalize_verification(item_data)
+            if proceed:
+                # Open checklist review dialog
+                self.review_checklist_now()
+                
+                # After review, check again
+                is_complete, pending_count = self.is_checklist_complete()
+                
+                if not is_complete:
+                    messagebox.showinfo(
+                        "Checklist Still Incomplete",
+                        "Cabinet cannot be finalized until checklist is complete."
+                    )
+                    return
+            else:
                 return
-            
-            punches.sort(key=lambda p: (not p['implemented'], p['sr_no']))
-            
-            # Dialog
-            dlg = tk.Toplevel(self.root)
-            dlg.title("Punch Verification Mode")
-            dlg.geometry("950x650")
-            dlg.configure(bg='#f8fafc')
-            dlg.transient(self.root)
-            dlg.grab_set()
-            
-            # Header
-            header_frame = tk.Frame(dlg, bg='#7c3aed', height=50)
-            header_frame.pack(fill=tk.X)
-            header_frame.pack_propagate(False)
-            
-            tk.Label(header_frame, text="✓ Punch Verification Mode", 
-                    bg='#7c3aed', fg='white', 
-                    font=('Segoe UI', 13, 'bold')).pack(pady=12)
-            
-            # Progress
-            progress_frame = tk.Frame(dlg, bg='#f8fafc')
-            progress_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
-            
-            idx_label = tk.Label(progress_frame, text="", font=('Segoe UI', 10, 'bold'),
-                                bg='#f8fafc', fg='#1e293b')
-            idx_label.pack()
-            
-            # Info cards
-            info_frame = tk.Frame(dlg, bg='#f8fafc')
-            info_frame.pack(fill=tk.X, padx=20, pady=8)
-            
-            sr_card = tk.Frame(info_frame, bg='#dbeafe', relief=tk.FLAT)
-            sr_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-            
-            tk.Label(sr_card, text="SR No.", font=('Segoe UI', 8), 
-                    bg='#dbeafe', fg='#1e40af').pack(anchor='w', padx=10, pady=(6, 2))
-            sr_label = tk.Label(sr_card, text="", font=('Segoe UI', 12, 'bold'),
-                               bg='#dbeafe', fg='#1e293b')
-            sr_label.pack(anchor='w', padx=10, pady=(0, 6))
-            
-            ref_card = tk.Frame(info_frame, bg='#e0e7ff', relief=tk.FLAT)
-            ref_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-            
-            tk.Label(ref_card, text="Reference", font=('Segoe UI', 8), 
-                    bg='#e0e7ff', fg='#4338ca').pack(anchor='w', padx=10, pady=(6, 2))
-            ref_label = tk.Label(ref_card, text="", font=('Segoe UI', 12, 'bold'),
-                                bg='#e0e7ff', fg='#1e293b')
-            ref_label.pack(anchor='w', padx=10, pady=(0, 6))
-            
-            status_card = tk.Frame(info_frame, bg='#fef3c7', relief=tk.FLAT)
-            status_card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
-            
-            tk.Label(status_card, text="Status", font=('Segoe UI', 8), 
-                    bg='#fef3c7', fg='#92400e').pack(anchor='w', padx=10, pady=(6, 2))
-            impl_label = tk.Label(status_card, text="", font=('Segoe UI', 12, 'bold'),
-                                 bg='#fef3c7', fg='#1e293b')
-            impl_label.pack(anchor='w', padx=10, pady=(0, 6))
-            
-            # Content
-            content_frame = tk.Frame(dlg, bg='white', relief=tk.FLAT)
-            content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=8)
-            
-            tk.Label(content_frame, text="Punch Description:", font=('Segoe UI', 9, 'bold'),
-                    bg='white', fg='#64748b', anchor='w').pack(fill=tk.X, padx=15, pady=(8, 3))
-            
-            text_widget = tk.Text(content_frame, wrap=tk.WORD, height=9,
-                                 font=('Segoe UI', 10), bg='#f8fafc',
-                                 relief=tk.FLAT, padx=10, pady=8)
-            text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
-            text_widget.config(state=tk.DISABLED)
         
-            pos = [0]
+        print("✓ Checklist complete - auto-finalizing cabinet...")
         
-            def show_item():
-                p = punches[pos[0]]
-                
-                progress_text = f"Item {pos[0]+1} of {len(punches)}"
-                progress_pct = f"({int((pos[0]+1)/len(punches)*100)}% complete)"
-                idx_label.config(text=f"{progress_text} {progress_pct}")
-                
-                sr_label.config(text=str(p['sr_no']))
-                ref_label.config(text=str(p['ref_no']))
-                
-                impl_status = "✓ Implemented" if p['implemented'] else "⚠ Not Implemented"
-                impl_color = '#10b981' if p['implemented'] else '#f59e0b'
-                impl_label.config(text=impl_status, fg=impl_color)
-                
-                text_widget.config(state=tk.NORMAL)
-                text_widget.delete("1.0", tk.END)
-                text_widget.insert(tk.END, p['punch_text'])
-                text_widget.insert(tk.END, f"\n\n──────────────────\n")
-                text_widget.insert(tk.END, f"Category: {p['category']}\n")
-        
-                # Find annotation - checks for both SR number and excel row
-                ann = next((a for a in self.annotations 
-                           if a.get('sr_no') == p['sr_no'] 
-                           or (a.get('excel_row') == p['row'])), None)
-                
-                if ann and ann.get('quality_remark'):
-                    text_widget.insert(tk.END, f"\n──────────────────\n")
-                    text_widget.insert(tk.END, "Quality Remarks:\n")
-                    text_widget.insert(tk.END, ann['quality_remark'])
-                
-                text_widget.config(state=tk.DISABLED)
-        
-            show_item()
-        
-            def add_remark():
-                """Add quality-side remark to push cabinet back to production"""
-                p = punches[pos[0]]
-                
-                # Find annotation
-                ann = next((a for a in self.annotations 
-                           if a.get('sr_no') == p['sr_no'] 
-                           or (a.get('excel_row') == p['row'])), None)
-                
-                current_remark = ann.get('quality_remark', '') if ann else ''
-                
-                remark = simpledialog.askstring(
-                    "Add Quality Remark", 
-                    f"Enter quality remark for SR {p['sr_no']}:\n(This will be sent back to production)",
-                    initialvalue=current_remark,
-                    parent=dlg
-                )
-                
-                if remark is not None:  # Allow empty string to clear remark
-                    if ann:
-                        ann['quality_remark'] = remark
-                        messagebox.showinfo("Success", "Quality remark added successfully!")
-                        show_item()  # Refresh display
+        try:
+            # 1. Save session
+            self.save_session()
+            
+            # 2. Save Interphase Excel
+            interphase_path = os.path.join(
+                self.project_dirs["interphase_export"],
+                f"{self.cabinet_id.replace(' ', '_')}_Interphase.xlsx"
+            )
+            
+            try:
+                shutil.copy2(self.excel_file, interphase_path)
+                print(f"✓ Interphase Excel saved: {interphase_path}")
+            except Exception as e:
+                print(f"⚠️ Failed to save Interphase Excel: {e}")
+            
+            # 3. Export annotated PDF
+            self.export_annotated_pdf()
+            print("✓ Annotated PDF exported")
+            
+            # 4. Update status to Closed
+            self.update_status_and_sync('closed')
+            print("✓ Status updated to: Closed")
+            
+            # 5. ✅ NEW: Remove from rework queue if present
+            username = self.logged_in_fullname or "Unknown User"
+            
+            try:
+                if self.handover_db.is_in_rework_queue(self.cabinet_id):
+                    print(f"⚠️ {self.cabinet_id} found in rework queue - removing...")
+                    
+                    removed = self.handover_db.verify_production_item(
+                        self.cabinet_id,
+                        verified_by=username,
+                        verification_notes="Cabinet finalized - all punches closed and verified",
+                        mark_as_closed=True
+                    )
+                    
+                    if removed:
+                        print(f"✓ Removed {self.cabinet_id} from rework verification queue")
                     else:
-                        messagebox.showwarning("Warning", "No annotation found for this punch item.")
+                        print(f"⚠️ Failed to remove {self.cabinet_id} from rework queue")
+            except Exception as e:
+                print(f"⚠️ Error removing from rework queue: {e}")
+            
+            # 6. Show success message
+            messagebox.showinfo(
+                "Cabinet Finalized",
+                f"✓ Cabinet {self.cabinet_id} has been finalized!\n\n"
+                "• All punches closed\n"
+                "• Checklist complete\n"
+                "• Excel exported\n"
+                "• PDF exported\n"
+                "• Status: Closed\n"
+                "• Removed from queues",
+                icon='info'
+            )
+            
+        except Exception as e:
+            messagebox.showerror("Finalization Error", f"Failed to finalize cabinet:\n{e}")
+            import traceback
+            traceback.print_exc()
+
+    # UPDATED: handover_to_production - with checklist check and queue management
+    def handover_to_production(self):
+        """Handover current cabinet to production with checklist validation"""
         
-            def close_punch():
-                p = punches[pos[0]]
+        if not self.pdf_document or not self.excel_file:
+            messagebox.showwarning("Incomplete", 
+                                  "Please load a PDF and Excel file first.")
+            return
         
-                try:
-                    default_user = os.getlogin()
-                except:
-                    default_user = getpass.getuser()
+        if not self.cabinet_id or not self.project_name:
+            messagebox.showwarning("Missing Info", 
+                                  "Project details are incomplete.")
+            return
         
-                name = simpledialog.askstring("Closed By", 
-                                             "Enter your name to close this punch:", 
-                                             initialvalue=default_user, 
-                                             parent=dlg)
-                if not name:
-                    return
+        # Check if there are any annotations
+        if not self.annotations:
+            proceed = messagebox.askyesno(
+                "No Annotations",
+                "No annotations found. Handover anyway?",
+                icon='warning'
+            )
+            if not proceed:
+                return
         
-                try:
-                    wb = load_workbook(self.excel_file)
-                    ws = wb[self.punch_sheet_name]
+        # ✨ NEW: Check checklist completion BEFORE handover
+        is_complete, pending_count = self.is_checklist_complete()
         
-                    self.write_cell(ws, p['row'], self.punch_cols['closed_name'], name)
-                    # Updated to include timestamp + date
-                    self.write_cell(ws, p['row'], self.punch_cols['closed_date'], 
-                                  datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        
-                    wb.save(self.excel_file)
-                    wb.close()
-        
-                except PermissionError:
-                    messagebox.showerror("File Locked", 
-                                       "⚠️ Please close the Excel file and try again.")
-                    return
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to close punch:\n{e}")
-                    return
-        
-                # Find and convert annotation color from orange to green
-                ann = next((a for a in self.annotations 
-                           if a.get('sr_no') == p['sr_no'] 
-                           or (a.get('excel_row') == p['row'])), None)
+        if not is_complete:
+            messagebox.showwarning(
+                "Checklist Incomplete",
+                f"⚠️ Cannot handover to production.\n\n"
+                f"{pending_count} checklist item(s) not reviewed.\n\n"
+                "Please complete the checklist first.",
+                icon='warning'
+            )
+            
+            # Ask if they want to complete it now
+            complete_now = messagebox.askyesno(
+                "Complete Checklist?",
+                "Would you like to complete the checklist now?",
+                icon='question'
+            )
+            
+            if complete_now:
+                self.review_checklist_now()
                 
-                if ann:
-                    # Convert orange highlight to green (KEEP the annotation)
-                    if ann.get('type') == 'highlight' and ann.get('color') == 'orange':
-                        ann['color'] = 'green'  # Change from error to OK
-                        print(f"✓ Verification: Converted annotation to green for SR {p['sr_no']}")
-                    
-                    # Also handle old rectangle-style error annotations
-                    elif ann.get('type') == 'error':
-                        ann['type'] = 'ok'  # Convert error rectangle to OK
-                        print(f"✓ Verification: Converted error rectangle to OK for SR {p['sr_no']}")
-                    
-                    # Store closure information
-                    ann['closed_by'] = name
-                    ann['closed_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    print(f"⚠️ Warning: No annotation found for SR {p['sr_no']} (Row {p['row']})")
-        
-                # Refresh display to show green highlight
-                self.display_page()
+                # Check again after review
+                is_complete, pending_count = self.is_checklist_complete()
                 
-                # Update stats after closing
-                self.sync_manager_stats_only()
+                if not is_complete:
+                    messagebox.showinfo(
+                        "Handover Cancelled",
+                        "Checklist still incomplete. Handover cancelled."
+                    )
+                    return
+            else:
+                return
         
-                if pos[0] < len(punches) - 1:
-                    pos[0] += 1
-                    show_item()
-                else:
-                    messagebox.showinfo("All Punches Closed", 
-                                      f"✓ All punches verified and closed!\n{len(punches)} items processed.",
-                                      icon='info')
-                    dlg.destroy()
-                    # Proceed to finalization
-                    self.finalize_verification(item_data)
+        # Count open punches
+        open_punches = self.count_open_punches()
         
-            def next_item():
-                if pos[0] < len(punches) - 1:
-                    pos[0] += 1
-                    show_item()
+        if open_punches > 0:
+            proceed = messagebox.askyesno(
+                "Open Punches Detected",
+                f"⚠️ There are {open_punches} open punch(es).\n\n"
+                "Are you sure you want to handover to production?",
+                icon='warning'
+            )
+            if not proceed:
+                return
         
-            def prev_item():
-                if pos[0] > 0:
-                    pos[0] -= 1
-                    show_item()
+        # Save session before handover
+        self.save_session()
         
-            # Buttons
-            btn_frame = tk.Frame(dlg, bg='#f8fafc', height=80)
-            btn_frame.pack(fill=tk.X, padx=20, pady=(10, 25))
-            btn_frame.pack_propagate(False)
-            
-            btn_container = tk.Frame(btn_frame, bg='#f8fafc')
-            btn_container.pack(expand=True)
-            
-            btn_style = {
-                'font': ('Segoe UI', 12, 'bold'),
-                'relief': tk.FLAT,
-                'borderwidth': 0,
-                'cursor': 'hand2',
-                'padx': 35,
-                'pady': 18,
-                'width': 15
-            }
+        # Get user name
+        username = self.logged_in_fullname or "Unknown User"
         
-            tk.Button(btn_container, text="◀  Previous", command=prev_item, 
-                     bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-            
-            tk.Button(btn_container, text="📝 Add Remark", command=add_remark, 
-                     bg='#3b82f6', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-            
-            close_btn_style = btn_style.copy()
-            close_btn_style['width'] = 18
-            tk.Button(btn_container, text="✓  CLOSE PUNCH", command=close_punch, 
-                     bg='#10b981', fg='white', **close_btn_style).pack(side=tk.LEFT, padx=8)
-            
-            tk.Button(btn_container, text="Next  ▶", command=next_item, 
-                     bg='#94a3b8', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
-            
-            tk.Button(btn_container, text="Cancel", command=dlg.destroy, 
-                     bg='#64748b', fg='white', **btn_style).pack(side=tk.LEFT, padx=8)
+        # Prepare handover data
+        session_path = os.path.join(
+            self.project_dirs.get("sessions", ""),
+            f"{self.cabinet_id}_annotations.json"
+        )
         
-            dlg.wait_window()
+        error_highlights = [a for a in self.annotations 
+                           if a.get('type') == 'highlight' and a.get('color') == 'orange']
+        total_punches = len(error_highlights)
+        
+        handover_data = {
+            "cabinet_id": self.cabinet_id,
+            "project_name": self.project_name,
+            "sales_order_no": self.sales_order_no,
+            "pdf_path": self.current_pdf_path,
+            "excel_path": self.excel_file,
+            "session_path": session_path if os.path.exists(session_path) else None,
+            "total_punches": total_punches,
+            "open_punches": open_punches,
+            "closed_punches": total_punches - open_punches,
+            "handed_over_by": username,
+            "handed_over_date": datetime.now().isoformat()
+        }
+        
+        # ✨ NEW: Remove from verify rework queue if present
+        try:
+            # Check if in rework queue
+            pending_items = self.handover_db.get_pending_quality_items()
+            in_rework_queue = any(item['cabinet_id'] == self.cabinet_id for item in pending_items)
+            
+            if in_rework_queue:
+                # Remove from rework queue
+                self.handover_db.verify_production_item(
+                    self.cabinet_id,
+                    verified_by=username,
+                    verification_notes="Re-opened for quality inspection"
+                )
+                print(f"✓ Removed {self.cabinet_id} from verify rework queue")
+        except Exception as e:
+            print(f"⚠️ Error checking/removing from rework queue: {e}")
+        
+        # Add to production queue
+        success = self.handover_db.add_quality_handover(handover_data)
+        self.update_status_and_sync('handed_to_production')
+        
+        if success:
+            messagebox.showinfo("Handover Complete", 
+                              "✓ Successfully handed over to Production\n\n"
+                              f"Cabinet: {self.cabinet_id}\n"
+                              f"✓ Checklist: Complete\n"
+                              f"✓ Total Punches: {total_punches}\n"
+                              f"⚠ Open Punches: {open_punches}")
+        else:
+            messagebox.showwarning("Already Handed Over", 
+                                 "Cabinet already in production queue")
 
 
     def update_interphase_status_for_ref(self, ref_no, status='NOK'):
@@ -4476,10 +4564,7 @@ class CircuitInspector:
                 # Updated to include timestamp + date
                 current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
-                try:
-                    username = os.getlogin()
-                except:
-                    username = getpass.getuser()
+                username = self.logged_in_fullname or "Unknown User"
                 
                 for r in range(1, ws.max_row + 1):
                     cell_val = self.read_cell(ws, r, self.interphase_cols['ref_no'])
@@ -4500,283 +4585,6 @@ class CircuitInspector:
     # ============================================================================
     # NEW: finalize_verification - Check checklist, save Excel, export PDF
     # ============================================================================
-
-    def finalize_verification(self, item_data):
-        """Final step: check checklist completeness, save Excel, export PDF"""
-        
-        # 1. Check checklist completeness
-        checklist_complete, incomplete_refs = self.check_checklist_completeness()
-        
-        if not checklist_complete:
-            warning_msg = (
-                f"⚠️ Checklist Incomplete!\n\n"
-                f"{len(incomplete_refs)} reference(s) without status:\n"
-                f"{', '.join(incomplete_refs[:10])}"
-            )
-            if len(incomplete_refs) > 10:
-                warning_msg += f"\n... and {len(incomplete_refs) - 10} more"
-            
-            warning_msg += "\n\nDo you want to review the checklist now?"
-            
-            review = messagebox.askyesno("Incomplete Checklist", warning_msg, icon='warning')
-            if review:
-                self.review_checklist_now()
-                # After review, ask again if they want to finalize
-                retry = messagebox.askyesno(
-                    "Continue?",
-                    "Review complete. Proceed with closing the cabinet?",
-                    icon='question'
-                )
-                if not retry:
-                    return
-                
-                # Re-check completeness after review
-                checklist_complete, incomplete_refs = self.check_checklist_completeness()
-                if not checklist_complete:
-                    messagebox.showwarning(
-                        "Still Incomplete",
-                        f"Checklist still has {len(incomplete_refs)} incomplete item(s).\n"
-                        "Proceeding anyway...",
-                        icon='warning'
-                    )
-            else:
-                # User chose not to review - warn but allow to continue
-                proceed = messagebox.askyesno(
-                    "Continue Anyway?",
-                    "Checklist is incomplete. Continue with closing?",
-                    icon='warning'
-                )
-                if not proceed:
-                    return
-        
-        # 2. Confirm closing
-        confirm_msg = (
-            f"Cabinet: {item_data['cabinet_id']}\n"
-            f"Project: {item_data['project_name']}\n\n"
-            f"✓ All punches closed\n"
-            f"{'✓' if checklist_complete else '⚠'} Checklist {'complete' if checklist_complete else 'reviewed'}\n\n"
-            f"This will:\n"
-            f"• Save Interphase Excel\n"
-            f"• Export Annotated PDF\n"
-            f"• Mark cabinet as CLOSED\n\n"
-            f"Proceed?"
-        )
-        
-        confirm = messagebox.askyesno("Close Cabinet", confirm_msg, icon='question')
-        if not confirm:
-            return
-        
-        # 3. Save current session first
-        try:
-            self.save_session()
-        except Exception as e:
-            print(f"Session save warning: {e}")
-        
-        # 4. Auto-save Interphase Excel
-        try:
-            if not self.excel_file or not os.path.exists(self.excel_file):
-                messagebox.showerror("Error", "Working Excel file not found.")
-                return
-            
-            save_path = os.path.join(
-                self.project_dirs["interphase_export"],
-                f"{self.cabinet_id.replace(' ', '_')}_Interphase.xlsx"
-            )
-            
-            shutil.copy2(self.excel_file, save_path)
-            print(f"✓ Interphase Excel saved: {save_path}")
-            
-        except PermissionError:
-            messagebox.showerror("Error", "Excel file is open. Please close it and try again.")
-            return
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save Excel:\n{e}")
-            return
-        
-        # 5. Auto-export annotated PDF
-        try:
-            if not self.pdf_document:
-                messagebox.showerror("Error", "No PDF document loaded.")
-                return
-            
-            export_path = os.path.join(
-                self.project_dirs["annotated_drawings"],
-                f"{self.cabinet_id.replace(' ', '_')}_Annotated.pdf"
-            )
-            
-            # Create output PDF
-            out_doc = fitz.open()
-            for pnum in range(len(self.pdf_document)):
-                out_doc.insert_pdf(self.pdf_document, from_page=pnum, to_page=pnum)
-            
-            # Open Excel for SR No lookup
-            wb = None
-            ws = None
-            if self.excel_file and os.path.exists(self.excel_file):
-                try:
-                    wb = load_workbook(self.excel_file, data_only=True)
-                    ws = wb[self.punch_sheet_name]
-                except:
-                    pass
-            
-            # Draw annotations
-            for ann in self.annotations:
-                p = ann.get('page')
-                if p is None or p < 0 or p >= len(out_doc):
-                    continue
-                
-                target_page = out_doc[p]
-                ann_type = ann.get('type')
-                
-                # Rectangle annotations
-                if ann_type in ('ok', 'error') and 'bbox_page' in ann:
-                    x1, y1, x2, y2 = ann['bbox_page']
-                    rect = self.transform_bbox_for_rotation((x1, y1, x2, y2), target_page)
-                    
-                    if ann_type == 'ok':
-                        target_page.draw_rect(rect, color=(0, 1, 0), width=2)
-                    else:
-                        target_page.draw_rect(rect, color=(1, 0.55, 0), width=2)
-                    
-                    sr_text = None
-                    row = ann.get('excel_row')
-                    
-                    if row and ws:
-                        try:
-                            sr_val = self.read_cell(ws, row, self.punch_cols['sr_no'])
-                            if sr_val is not None:
-                                sr_text = f"Sr {sr_val}"
-                        except:
-                            sr_text = None
-                    
-                    if sr_text:
-                        text_pos = fitz.Point(rect.x0, max(rect.y0 - 12, rect.y0))
-                        try:
-                            target_page.insert_text(text_pos, sr_text, fontsize=8)
-                        except:
-                            pass
-                
-                # Pen strokes
-                elif ann_type == 'pen' and 'points' in ann:
-                    points = ann['points']
-                    if len(points) >= 2:
-                        transformed_points = [
-                            self.transform_point_for_rotation(pt, target_page) 
-                            for pt in points
-                        ]
-                        
-                        for i in range(len(transformed_points) - 1):
-                            p1 = transformed_points[i]
-                            p2 = transformed_points[i + 1]
-                            target_page.draw_line(p1, p2, color=(1, 0, 0), width=2)
-                
-                # Text annotations
-                elif ann_type == 'text' and 'pos_page' in ann:
-                    pos = ann['pos_page']
-                    text = ann.get('text', '')
-                    if text:
-                        text_point = self.transform_point_for_rotation(pos, target_page)
-                        try:
-                            target_page.insert_text(
-                                text_point, text,
-                                fontsize=10, color=(1, 0, 0),
-                                rotate=target_page.rotation
-                            )
-                        except:
-                            pass
-            
-            if wb:
-                wb.close()
-            
-            out_doc.save(export_path)
-            out_doc.close()
-            
-            print(f"✓ Annotated PDF exported: {export_path}")
-            
-        except PermissionError:
-            messagebox.showerror("Error", "PDF file is open. Please close it and try again.")
-            return
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to export PDF:\n{e}")
-            return
-        
-        # 6. Update verification status
-        try:
-            username = os.getlogin()
-        except:
-            username = getpass.getuser()
-        
-        success = self.handover_db.update_quality_verification(
-            item_data['cabinet_id'],
-            status="closed",
-            user=username
-        )
-        
-        if success:
-            # Update manager status to 'closed'
-            self.update_status_and_sync('closed')
-            
-            messagebox.showinfo(
-                "✓ Verification Complete",
-                f"Cabinet {item_data['cabinet_id']} successfully closed!\n\n"
-                f"✓ Interphase Excel saved\n"
-                f"✓ Annotated PDF exported\n"
-                f"✓ Status updated to CLOSED\n\n"
-                f"Files saved to:\n{self.project_dirs['root']}",
-                icon='info'
-            )
-        else:
-            messagebox.showerror("Error", "Failed to update verification status.")
-
-
-    # ============================================================================
-    # NEW: check_checklist_completeness - Helper to check Interphase completion
-    # ============================================================================
-
-    def check_checklist_completeness(self):
-        """Check if all Interphase items have status (OK/NOK/N/A)
-        Returns: (is_complete: bool, incomplete_refs: list)
-        """
-        if not self.excel_file or not os.path.exists(self.excel_file):
-            return False, []
-        
-        try:
-            wb = load_workbook(self.excel_file, data_only=True)
-            if self.interphase_sheet_name not in wb.sheetnames:
-                wb.close()
-                return False, []
-            
-            ws = wb[self.interphase_sheet_name]
-            ref_col = self.interphase_cols['ref_no']
-            status_col = self.interphase_cols['status']
-            
-            incomplete_refs = []
-            max_row = ws.max_row if ws.max_row else 2000
-            
-            for r in range(11, max_row + 1):
-                ref_val = self.read_cell(ws, r, ref_col)
-                if ref_val is None:
-                    continue
-                
-                ref_str = str(ref_val).strip()
-                if not ref_str:
-                    continue
-                
-                status_val = self.read_cell(ws, r, status_col)
-                status_str = str(status_val).strip().lower() if status_val is not None else ''
-                
-                # Check if status is empty or invalid
-                if status_str not in ('ok', 'nok', 'n/a', 'na', 'not applicable'):
-                    incomplete_refs.append(ref_str)
-            
-            wb.close()
-            
-            is_complete = len(incomplete_refs) == 0
-            return is_complete, incomplete_refs
-            
-        except Exception as e:
-            print(f"Checklist check error: {e}")
-            return False, []
 
 
     def auto_save_session(self):
@@ -4973,13 +4781,6 @@ class CircuitInspector:
                 'last_accessed': datetime.now().isoformat()
             })
             
-            messagebox.showinfo(
-                "Project Loaded",
-                f"✓ Loaded: {self.cabinet_id}\n"
-                f"Project: {self.project_name}\n"
-                f"Location: {self.storage_location}\n"
-                f"Pages: {len(self.pdf_document)}"
-            )
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load project:\n{e}")
@@ -5025,221 +4826,9 @@ class CircuitInspector:
     # ============================================================================
     # UPDATED: handover_to_production - Counts orange highlights as punches
     # ============================================================================
-
-    def handover_to_production(self):
-        """Handover current cabinet to production - HIGHLIGHTER VERSION"""
-        
-        if not self.pdf_document or not self.excel_file:
-            messagebox.showwarning("Incomplete", 
-                                  "Please load a PDF and Excel file first.")
-            return
-        
-        if not self.cabinet_id or not self.project_name:
-            messagebox.showwarning("Missing Info", 
-                                  "Project details are incomplete.")
-            return
-        
-        # Check if there are any annotations
-        if not self.annotations:
-            proceed = messagebox.askyesno(
-                "No Annotations",
-                "No annotations found. Handover anyway?",
-                icon='warning'
-            )
-            if not proceed:
-                return
-        
-        # Count open punches
-        open_punches = self.count_open_punches()
-        
-        if open_punches > 0:
-            proceed = messagebox.askyesno(
-                "Open Punches Detected",
-                f"⚠️ There are {open_punches} open punch(es).\n\n"
-                "Are you sure you want to handover to production?",
-                icon='warning'
-            )
-            if not proceed:
-                return
-        
-        # Save session before handover
-        self.save_session()
-        
-        # Get user name
-        try:
-            username = os.getlogin()
-        except:
-            username = getpass.getuser()
-        
-        # Prepare handover data
-        session_path = os.path.join(
-            self.project_dirs.get("sessions", ""),
-            f"{self.cabinet_id}_annotations.json"
-        )
-        
-        # UPDATED: Count orange highlights as error punches
-        error_highlights = [a for a in self.annotations 
-                           if a.get('type') == 'highlight' and a.get('color') == 'orange']
-        total_punches = len(error_highlights)
-        
-        handover_data = {
-            "cabinet_id": self.cabinet_id,
-            "project_name": self.project_name,
-            "sales_order_no": self.sales_order_no,
-            "pdf_path": self.current_pdf_path,
-            "excel_path": self.excel_file,
-            "session_path": session_path if os.path.exists(session_path) else None,
-            "total_punches": total_punches,  # CHANGED: Now counts orange highlights
-            "open_punches": open_punches,
-            "closed_punches": total_punches - open_punches,
-            "handed_over_by": username,
-            "handed_over_date": datetime.now().isoformat()
-        }
-        
-        success = self.handover_db.add_quality_handover(handover_data)
-        self.update_status_and_sync('handed_to_production')
-        
-        if success:
-            messagebox.showinfo("Handover Complete", 
-                              "✓ Successfully handed over to Production\n\n"
-                              f"Cabinet: {self.cabinet_id}\n"
-                              f"Total Error Highlights: {total_punches}\n"
-                              f"Open Punches: {open_punches}")
-        else:
-            messagebox.showwarning("Already Handed Over", 
-                                 "Cabinet already in production queue")
-
     # ================================================================
     # COMPREHENSIVE STATUS AND STATISTICS MANAGEMENT
     # ================================================================
-
-
-
-    def sync_manager_stats_only(self):
-        """Sync ONLY statistics, don't touch status at all
-        
-        Use this when you want to update counts without changing workflow status.
-        This is safe to call frequently (e.g., after each annotation).
-        
-        IMPORTANT: If cabinet doesn't exist in database, it will be created with
-        status determined from Interphase worksheet (or defaults to 'quality_inspection')
-        """
-        if not self.pdf_document or not self.cabinet_id:
-            return
-        
-        try:
-            # Count pages with annotations
-            annotated_pages = len(set(ann['page'] for ann in self.annotations 
-                                     if ann.get('page') is not None))
-            total_pages = len(self.pdf_document)
-            
-            # Count punches
-            error_anns = [a for a in self.annotations if a.get('type') == 'error']
-            total_punches = len(error_anns)
-            open_punches = self.count_open_punches()
-            
-            # Count implemented and closed
-            implemented_punches = 0
-            closed_punches = 0
-            
-            if self.excel_file and os.path.exists(self.excel_file):
-                try:
-                    from openpyxl import load_workbook
-                    wb = load_workbook(self.excel_file, data_only=True)
-                    ws = wb[self.punch_sheet_name] if self.punch_sheet_name in wb.sheetnames else wb.active
-                    
-                    row = 9  # Start from row 9 (matching manager code)
-                    while row <= ws.max_row + 5:
-                        # Check if this row has a punch (has checked_name)
-                        checked = self.read_cell(ws, row, self.punch_cols['checked_name'])
-                        
-                        if checked:  # This is a logged punch
-                            implemented = self.read_cell(ws, row, self.punch_cols['implemented_name'])
-                            closed = self.read_cell(ws, row, self.punch_cols['closed_name'])
-                            
-                            if closed:
-                                closed_punches += 1
-                            elif implemented:
-                                implemented_punches += 1
-                        
-                        row += 1
-                        
-                        # Safety limit
-                        if row > 2000:
-                            break
-                    
-                    wb.close()
-                except:
-                    pass
-            
-            # Check if cabinet exists in database
-            conn = sqlite3.connect(self.manager_db.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('SELECT status FROM cabinets WHERE cabinet_id = ?', (self.cabinet_id,))
-            existing = cursor.fetchone()
-            
-            if existing:
-                # Cabinet exists - UPDATE ONLY statistics (preserve status)
-                cursor.execute('''
-                    UPDATE cabinets 
-                    SET total_pages = ?,
-                        annotated_pages = ?,
-                        total_punches = ?,
-                        open_punches = ?,
-                        implemented_punches = ?,
-                        closed_punches = ?,
-                        last_updated = ?,
-                        excel_path = ?,
-                        storage_location = ?
-                    WHERE cabinet_id = ?
-                ''', (total_pages, annotated_pages, total_punches, open_punches,
-                      implemented_punches, closed_punches, datetime.now().isoformat(),
-                      self.excel_file, getattr(self, 'storage_location', None),
-                      self.cabinet_id))
-                
-                print(f"✓ Updated stats for {self.cabinet_id} (status: {existing[0]})")
-            else:
-                # Cabinet doesn't exist - CREATE with initial status
-                # Try to get status from Interphase worksheet first
-                initial_status = self.get_status_from_interphase(self.excel_file)
-                
-                cursor.execute('''
-                    INSERT INTO cabinets (
-                        cabinet_id, project_name, sales_order_no,
-                        total_pages, annotated_pages, total_punches,
-                        open_punches, implemented_punches, closed_punches,
-                        status, created_date, last_updated,
-                        storage_location, excel_path
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    self.cabinet_id,
-                    self.project_name,
-                    self.sales_order_no,
-                    total_pages,
-                    annotated_pages,
-                    total_punches,
-                    open_punches,
-                    implemented_punches,
-                    closed_punches,
-                    initial_status,
-                    datetime.now().isoformat(),
-                    datetime.now().isoformat(),
-                    getattr(self, 'storage_location', None),
-                    self.excel_file
-                ))
-                
-                print(f"✓ Created {self.cabinet_id} in dashboard with status: {initial_status}")
-                print(f"  Stats: {total_punches} punches ({open_punches} open, "
-                      f"{implemented_punches} implemented, {closed_punches} closed)")
-            
-            conn.commit()
-            conn.close()
-            
-        except Exception as e:
-            print(f"Stats sync error: {e}")
-            import traceback
-            traceback.print_exc()
 
 
     def sync_manager_stats(self):
@@ -5329,9 +4918,142 @@ class CircuitInspector:
         except Exception as e:
             print(f"Error counting open punches: {e}")
             return 0
+        
+    def sync_manager_stats_only(self, update_status_from_interphase=True):
+        """Sync statistics and optionally update status from Interphase
+        
+        Args:
+            update_status_from_interphase: If True, recalculate status from Interphase worksheet
+        """
+        if not self.pdf_document or not self.cabinet_id:
+            return
+        
+        try:
+            # Count pages with annotations
+            annotated_pages = len(set(ann['page'] for ann in self.annotations 
+                                     if ann.get('page') is not None))
+            total_pages = len(self.pdf_document)
+            
+            # Count punches
+            error_anns = [a for a in self.annotations if a.get('type') == 'error']
+            total_punches = len(error_anns)
+            open_punches = self.count_open_punches()
+            
+            # Count implemented and closed
+            implemented_punches = 0
+            closed_punches = 0
+            
+            if self.excel_file and os.path.exists(self.excel_file):
+                try:
+                    from openpyxl import load_workbook
+                    wb = load_workbook(self.excel_file, data_only=True)
+                    ws = wb[self.punch_sheet_name] if self.punch_sheet_name in wb.sheetnames else wb.active
+                    
+                    row = 8
+                    while row <= ws.max_row + 5:
+                        checked = self.read_cell(ws, row, self.punch_cols['checked_name'])
+                        
+                        if checked:
+                            implemented = self.read_cell(ws, row, self.punch_cols['implemented_name'])
+                            closed = self.read_cell(ws, row, self.punch_cols['closed_name'])
+                            
+                            if closed:
+                                closed_punches += 1
+                            elif implemented:
+                                implemented_punches += 1
+                        
+                        row += 1
+                        if row > 2000:
+                            break
+                    
+                    wb.close()
+                except Exception as e:
+                    print(f"Error counting punches: {e}")
+            
+            # Determine status
+            conn = sqlite3.connect(self.manager_db.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT status FROM cabinets WHERE cabinet_id = ?', (self.cabinet_id,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Cabinet exists - get current status
+                current_status = existing[0]
+                
+                # Update status from Interphase if requested AND if status is workflow-related
+                workflow_statuses = [
+                    'project_info_sheet',
+                    'mechanical_assembly', 
+                    'component_assembly',
+                    'final_assembly',
+                    'final_documentation',
+                    'quality_inspection'
+                ]
+                
+                if update_status_from_interphase and current_status in workflow_statuses:
+                    new_status = self.get_status_from_interphase(self.excel_file)
+                    if new_status:
+                        current_status = new_status
+                        print(f"✓ Status updated from Interphase: {new_status}")
+                
+                # Update with potentially new status
+                cursor.execute('''
+                    UPDATE cabinets 
+                    SET total_pages = ?,
+                        annotated_pages = ?,
+                        total_punches = ?,
+                        open_punches = ?,
+                        implemented_punches = ?,
+                        closed_punches = ?,
+                        status = ?,
+                        last_updated = ?,
+                        excel_path = ?,
+                        storage_location = ?
+                    WHERE cabinet_id = ?
+                ''', (total_pages, annotated_pages, total_punches, open_punches,
+                      implemented_punches, closed_punches, current_status,
+                      datetime.now().isoformat(), self.excel_file, 
+                      getattr(self, 'storage_location', None), self.cabinet_id))
+                
+                print(f"✓ Updated {self.cabinet_id} - Status: {current_status}")
+            else:
+                # Cabinet doesn't exist - create with initial status from Interphase
+                initial_status = self.get_status_from_interphase(self.excel_file)
+                if not initial_status:
+                    initial_status = 'quality_inspection'
+                
+                cursor.execute('''
+                    INSERT INTO cabinets (
+                        cabinet_id, project_name, sales_order_no,
+                        total_pages, annotated_pages, total_punches,
+                        open_punches, implemented_punches, closed_punches,
+                        status, created_date, last_updated,
+                        storage_location, excel_path
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    self.cabinet_id, self.project_name, self.sales_order_no,
+                    total_pages, annotated_pages, total_punches,
+                    open_punches, implemented_punches, closed_punches,
+                    initial_status, datetime.now().isoformat(),
+                    datetime.now().isoformat(),
+                    getattr(self, 'storage_location', None), self.excel_file
+                ))
+                
+                print(f"✓ Created {self.cabinet_id} with status: {initial_status}")
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            print(f"Stats sync error: {e}")
+            import traceback
+            traceback.print_exc()
+
 
     def get_status_from_interphase(self, excel_path):
-        """Read Interphase worksheet and determine status based on reference number
+        """Read Interphase worksheet and determine status based on HIGHEST filled reference number
+        
         Returns: status string or None if not determined from Interphase
         """
         if not excel_path or not os.path.exists(excel_path):
@@ -5341,64 +5063,121 @@ class CircuitInspector:
             from openpyxl import load_workbook
             wb = load_workbook(excel_path, data_only=True)
             
-            # Check if Interphase worksheet exists
             if 'Interphase' not in wb.sheetnames:
                 wb.close()
                 return None
             
             ws = wb['Interphase']
             
-            # Find the lowest filled status cell in column D
-            lowest_status_row = None
-            lowest_ref_no = None
+            # Find the HIGHEST reference number that has a status
+            highest_ref_num = 0
             
-            # Start from row 2 (assuming row 1 is header)
-            for row in range(2, ws.max_row + 1):
-                status_cell = self.read_cell(ws, row, 'D')
+            # Start from row 11 (typical Interphase data starts here)
+            for row in range(11, ws.max_row + 1):
+                status_cell = self.read_cell(ws, row, 'D')  # Status column
                 
                 # If status cell has content, check the reference number
-                if status_cell:
-                    ref_no_cell = self.read_cell(ws, row, 'B')
+                if status_cell and str(status_cell).strip():
+                    ref_no_cell = self.read_cell(ws, row, 'B')  # Reference column
                     
                     if ref_no_cell:
-                        lowest_status_row = row
-                        lowest_ref_no = str(ref_no_cell).strip()
+                        try:
+                            ref_str = str(ref_no_cell).strip()
+                            
+                            # Handle range formats like "1-2" - take the LAST number
+                            if '-' in ref_str:
+                                ref_num = int(ref_str.split('-')[-1])
+                            else:
+                                ref_num = int(ref_str)
+                            
+                            # Track highest completed reference
+                            if ref_num > highest_ref_num:
+                                highest_ref_num = ref_num
+                        
+                        except (ValueError, IndexError):
+                            continue
             
             wb.close()
             
-            # If we found a reference number, determine the status
-            if lowest_ref_no:
-                try:
-                    # Handle range formats like "1-2" or single numbers like "5"
-                    if '-' in lowest_ref_no:
-                        # Get the first number in the range
-                        ref_num = int(lowest_ref_no.split('-')[0])
-                    else:
-                        ref_num = int(lowest_ref_no)
-                    
-                    # Determine status based on reference number
-                    if 1 <= ref_num <= 2:
-                        return 'project_info_sheet'
-                    elif 3 <= ref_num <= 9:
-                        return 'mechanical_assembly'
-                    elif 10 <= ref_num <= 18:
-                        return 'component_assembly'
-                    elif 19 <= ref_num <= 26:
-                        return 'final_assembly'
-                    elif 27 <= ref_num <= 31:
-                        return 'final_documentation'
-                
-                except (ValueError, IndexError):
-                    # If we can't parse the reference number, return None
-                    pass
-            
-            return None
+            # Determine status based on highest completed reference number
+            if highest_ref_num == 0:
+                return 'quality_inspection'  # Nothing completed yet
+            elif 1 <= highest_ref_num <= 2:
+                return 'project_info_sheet'
+            elif 3 <= highest_ref_num <= 9:
+                return 'mechanical_assembly'
+            elif 10 <= highest_ref_num <= 18:
+                return 'component_assembly'
+            elif 19 <= highest_ref_num <= 26:
+                return 'final_assembly'
+            elif highest_ref_num >= 27:
+                return 'final_documentation'
+            else:
+                return 'quality_inspection'
             
         except Exception as e:
             print(f"Error reading Interphase worksheet: {e}")
             return None
 
 
+    def update_status_and_sync(self, new_status):
+        """Explicitly set status and sync to database
+        
+        Use this for manual status changes (handover, closing, etc.)
+        This will NOT be overridden by Interphase status.
+        
+        Args:
+            new_status: One of the valid status strings
+        """
+        try:
+            conn = sqlite3.connect(self.manager_db.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE cabinets 
+                SET status = ?, 
+                    last_updated = ?
+                WHERE cabinet_id = ?
+            ''', (new_status, datetime.now().isoformat(), self.cabinet_id))
+            
+            conn.commit()
+            conn.close()
+            
+            print(f"✓ Status manually updated to: {new_status}")
+            
+            # Now sync stats without changing status
+            self.sync_manager_stats_only(update_status_from_interphase=False)
+            
+        except Exception as e:
+            print(f"Status update error: {e}")
+
+
+    def get_current_status_from_db(self):
+        """Get the current status from database
+        
+        Returns:
+            str: Current status or 'quality_inspection' if not found
+        """
+        try:
+            conn = sqlite3.connect(self.manager_db.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT status FROM cabinets WHERE cabinet_id = ?', 
+                          (self.cabinet_id,))
+            result = cursor.fetchone()
+            
+            conn.close()
+            
+            if result:
+                return result[0]
+            else:
+                # If not in database, check Interphase
+                status = self.get_status_from_interphase(self.excel_file)
+                return status if status else 'quality_inspection'
+                
+        except Exception as e:
+            print(f"Error getting status from DB: {e}")
+            return 'quality_inspection'
     
 
 
